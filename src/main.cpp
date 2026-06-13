@@ -5,6 +5,8 @@
 #include <canvas/Arduino_Canvas.h>
 #include <Wire.h>
 #include <Adafruit_ISM330DHCX.h>
+#include <Adafruit_BMP3XX.h>
+#include <Adafruit_seesaw.h>
 #include <TinyGPSPlus.h>
 
 // Prevent esp32s3box BSP from initializing its own peripherals
@@ -36,16 +38,29 @@ Arduino_Canvas *canvas = new Arduino_Canvas(800, 480, gfx, 0, 0);
 
 // ================= SENSORS =================
 Adafruit_ISM330DHCX imu;
+Adafruit_BMP3XX bmp;
+bool bmpOk = false;
+float seaLevelPressure_hPa = 1013.25;
 TinyGPSPlus gps;
 #define gpsSerial Serial1
 
 // ================= ENCODER =================
-// Moved off GPIO2/3 (used by display R1/HSYNC) to free pins
-#define ENC_CLK 11
-#define ENC_DT  12
-#define ENC_SW  13
+// Adafruit seesaw-based STEMMA QT I2C rotary encoder
+#define SEESAW_ADDR 0x36
+#define SS_SWITCH   24
 
-int lastCLK;
+Adafruit_seesaw ss;
+bool encOk = false;
+int32_t encoderPosition = 0;
+bool encButtonHeld = false;
+unsigned long encButtonPressTime = 0;
+
+// ================= CALIBRATE SCREEN =================
+const char* calibItems[] = {
+  "QNH (hPa)", "Zero Pitch/Roll", "Zero Heading"
+};
+const int calibSize = 3;
+int calibIndex = 0;
 
 // ================= GLOBAL =================
 float pitch = 0, roll = 0, heading = 0;
@@ -73,11 +88,11 @@ void readEncoder();
 void readIMU();
 void readHeading();
 void readGPS();
+void readBaro();
 void drawMenu();
 void drawIcon(int x, int y, int type);
 void handleMenu();
 void screenTransition();
-void calibrate();
 void drawHorizon();
 void drawRollTape();
 void drawAltitudeTape();
@@ -85,6 +100,7 @@ void drawHeadingTape();
 void drawOverlay();
 void drawGPSScreen();
 void drawInfoScreen();
+void drawCalibrateScreen();
 void showBoot();
 
 // ================= DISPLAY POWER =================
@@ -125,13 +141,23 @@ void setup() {
   bool imuOk = imu.begin_I2C();
   Serial.printf("imu.begin_I2C() = %d\n", imuOk);
 
+  bmpOk = bmp.begin_I2C();
+  Serial.printf("bmp.begin_I2C() = %d\n", bmpOk);
+  if (bmpOk) {
+    bmp.setTemperatureOversampling(BMP3_OVERSAMPLING_2X);
+    bmp.setPressureOversampling(BMP3_OVERSAMPLING_4X);
+    bmp.setIIRFilterCoeff(BMP3_IIR_FILTER_COEFF_3);
+    bmp.setOutputDataRate(BMP3_ODR_50_HZ);
+  }
+
   gpsSerial.begin(9600);
 
-  pinMode(ENC_CLK, INPUT);
-  pinMode(ENC_DT, INPUT);
-  pinMode(ENC_SW, INPUT_PULLUP);
-
-  lastCLK = digitalRead(ENC_CLK);
+  encOk = ss.begin(SEESAW_ADDR);
+  Serial.printf("ss.begin() = %d\n", encOk);
+  if (encOk) {
+    ss.pinMode(SS_SWITCH, INPUT_PULLUP);
+    encoderPosition = ss.getEncoderPosition();
+  }
 
   showBoot();
 }
@@ -142,6 +168,7 @@ void loop() {
   readIMU();
   readHeading();
   readGPS();
+  readBaro();
 
   if (menuActive) {
     drawMenu();
@@ -156,6 +183,7 @@ void loop() {
         break;
       case 1: drawGPSScreen(); break;
       case 2: drawInfoScreen(); break;
+      case 3: drawCalibrateScreen(); break;
     }
   }
 
@@ -195,30 +223,65 @@ void readGPS() {
   gpsFix = gps.location.isValid();
   if (gpsFix) {
     speed_kmh = gps.speed.kmph();
-    altitude_m = gps.altitude.meters();
+    if (!bmpOk) altitude_m = gps.altitude.meters();
+  }
+}
+
+// ================= BAROMETER =================
+void readBaro() {
+  if (!bmpOk) return;
+  if (bmp.performReading()) {
+    altitude_m = bmp.readAltitude(seaLevelPressure_hPa);
   }
 }
 
 // ================= ENCODER =================
 void readEncoder() {
-  int currentCLK = digitalRead(ENC_CLK);
+  if (!encOk) return;
 
-  if (currentCLK != lastCLK && currentCLK == LOW) {
-    if (digitalRead(ENC_DT) != currentCLK) menuIndex++;
-    else menuIndex--;
+  int32_t newPosition = ss.getEncoderPosition();
+  int32_t delta = newPosition - encoderPosition;
+  encoderPosition = newPosition;
 
-    if (menuIndex < 0) menuIndex = menuSize-1;
-    if (menuIndex >= menuSize) menuIndex = 0;
+  if (menuActive) {
+    menuIndex += delta;
+    menuIndex %= menuSize;
+    if (menuIndex < 0) menuIndex += menuSize;
+  } else if (currentScreen == 3 && delta != 0) {
+    switch (calibIndex) {
+      case 0: // QNH
+        seaLevelPressure_hPa += delta * 0.5;
+        if (seaLevelPressure_hPa < 950) seaLevelPressure_hPa = 950;
+        if (seaLevelPressure_hPa > 1050) seaLevelPressure_hPa = 1050;
+        break;
+    }
   }
 
-  lastCLK = currentCLK;
+  bool pressed = !ss.digitalRead(SS_SWITCH);
 
-  if (digitalRead(ENC_SW) == LOW) {
-    delay(150);
+  if (pressed && !encButtonHeld) {
+    encButtonHeld = true;
+    encButtonPressTime = millis();
+  } else if (!pressed && encButtonHeld) {
+    encButtonHeld = false;
+    unsigned long heldFor = millis() - encButtonPressTime;
 
     if (menuActive) {
       handleMenu();
       menuActive = false;
+    } else if (heldFor >= 600) {
+      menuActive = true;
+    } else if (currentScreen == 3) {
+      switch (calibIndex) {
+        case 1: // Zero Pitch/Roll
+          pitchOffset = pitch;
+          rollOffset = roll;
+          break;
+        case 2: // Zero Heading
+          heading = 0;
+          break;
+      }
+      calibIndex = (calibIndex + 1) % calibSize;
     } else {
       menuActive = true;
     }
@@ -263,7 +326,7 @@ void handleMenu(){
     case 0: currentScreen=0; break;
     case 1: currentScreen=1; break;
     case 2: currentScreen=2; break;
-    case 3: calibrate(); break;
+    case 3: currentScreen=3; calibIndex=0; break;
   }
 }
 
@@ -275,12 +338,6 @@ void screenTransition(){
     canvas->flush();
     delay(5);
   }
-}
-
-// ================= CAL =================
-void calibrate(){
-  pitchOffset=pitch;
-  rollOffset=roll;
 }
 
 // ================= HORIZON =================
@@ -548,6 +605,36 @@ void drawInfoScreen(){
   canvas->setCursor(40,220);
   canvas->print("Head:");
   canvas->print(heading);
+}
+
+void drawCalibrateScreen(){
+  canvas->fillScreen(RGB565_BLACK);
+
+  canvas->setTextSize(4);
+  canvas->setTextColor(RGB565_YELLOW);
+  canvas->setCursor(40,40);
+  canvas->print("CALIBRATE");
+
+  canvas->setTextSize(3);
+  for(int i=0; i<calibSize; i++){
+    int y = 130 + i*60;
+    bool sel = (i == calibIndex);
+
+    canvas->setTextColor(sel ? RGB565_GREEN : RGB565_WHITE);
+    canvas->setCursor(40, y);
+    canvas->print(sel ? "> " : "  ");
+    canvas->print(calibItems[i]);
+
+    if(i == 0){
+      canvas->setCursor(450, y);
+      canvas->print(seaLevelPressure_hPa, 1);
+    }
+  }
+
+  canvas->setTextSize(2);
+  canvas->setTextColor(RGB565_WHITE);
+  canvas->setCursor(40, 130 + calibSize*60 + 40);
+  canvas->print("Rotate: adjust   Press: next   Hold: menu");
 }
 
 // ================= BOOT =================
