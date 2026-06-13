@@ -1,0 +1,393 @@
+#include <Arduino.h>
+#include <Arduino_GFX.h>
+#include <databus/Arduino_ESP32RGBPanel.h>
+#include <display/Arduino_RGB_Display.h>
+#include <canvas/Arduino_Canvas.h>
+#include <Wire.h>
+#include <Adafruit_ISM330DHCX.h>
+#include <TinyGPSPlus.h>
+
+// Prevent esp32s3box BSP from initializing its own peripherals
+// which conflict with the Waveshare RGB panel pin assignments
+extern "C" void initVariant() {}
+
+// ================= DISPLAY (Waveshare RGB panel) =================
+Arduino_ESP32RGBPanel *bus = new Arduino_ESP32RGBPanel(
+  5, 3, 46, 7,             // DE, VSYNC, HSYNC, PCLK
+  1, 2, 42, 41, 40,        // R0-R4
+  39, 0, 45, 48, 47, 21,   // G0-G5
+  14, 38, 18, 17, 10,      // B0-B4
+  0, 8, 4, 8,              // hsync: polarity, front_porch, pulse_width, back_porch
+  0, 8, 4, 8,              // vsync: polarity, front_porch, pulse_width, back_porch
+  1, 16000000              // pclk_active_neg, prefer_speed
+);
+
+Arduino_RGB_Display *gfx = new Arduino_RGB_Display(
+  800, 480, bus, 0, true
+);
+
+// HUD overlay sprite
+Arduino_Canvas *hud = new Arduino_Canvas(320, 120, gfx, 0, 0);
+
+// Extra colors not predefined by Arduino_GFX_Library
+#define COLOR_BROWN     gfx->color565(150, 75, 0)
+#define COLOR_DARKGREEN gfx->color565(0, 100, 0)
+
+// ================= SENSORS =================
+Adafruit_ISM330DHCX imu;
+TinyGPSPlus gps;
+#define gpsSerial Serial1
+
+// ================= ENCODER =================
+// Moved off GPIO2/3 (used by display R1/HSYNC) to free pins
+#define ENC_CLK 11
+#define ENC_DT  12
+#define ENC_SW  13
+
+int lastCLK;
+
+// ================= GLOBAL =================
+float pitch = 0, roll = 0, heading = 0;
+float speed_kmh = 0;
+bool gpsFix = false;
+
+// ================= MENU =================
+bool menuActive = false;
+int menuIndex = 0;
+int currentScreen = 0;
+int menuOffset = 0;
+
+const char* menuItems[] = {
+  "Horizon", "GPS", "Info", "Calibrate"
+};
+const int menuSize = 4;
+
+// ================= CALIBRATION =================
+float pitchOffset = 0, rollOffset = 0;
+
+// ================= FORWARD DECLARATIONS =================
+void enableDisplay();
+void readEncoder();
+void readIMU();
+void readHeading();
+void readGPS();
+void drawMenu();
+void drawIcon(int x, int y, int type);
+void handleMenu();
+void screenTransition();
+void calibrate();
+void drawHorizon();
+void drawJeep(int cx, int cy);
+void drawOverlay();
+void drawGPSScreen();
+void drawInfoScreen();
+void showBoot();
+
+// ================= DISPLAY POWER =================
+void enableDisplay() {
+  Wire.begin(8, 9);
+
+  // reg 0x02 = mode register: 0xFF = all 8 pins as outputs
+  Wire.beginTransmission(0x24);
+  Wire.write(0x02);
+  Wire.write(0xFF);
+  Wire.endTransmission();
+  delay(10);
+
+  // reg 0x03 = output register: 0xFF = all pins HIGH
+  // IO2 = backlight ON, IO3 = LCD reset released HIGH
+  Wire.beginTransmission(0x24);
+  Wire.write(0x03);
+  Wire.write(0xFF);
+  Wire.endTransmission();
+  delay(200);
+}
+
+// ================= SETUP =================
+void setup() {
+  Serial.begin(115200);
+  delay(1000);
+
+  enableDisplay();
+
+  gfx->begin();
+  hud->begin();
+
+  Wire.begin();
+  imu.begin_I2C();
+
+  gpsSerial.begin(9600);
+
+  pinMode(ENC_CLK, INPUT);
+  pinMode(ENC_DT, INPUT);
+  pinMode(ENC_SW, INPUT_PULLUP);
+
+  lastCLK = digitalRead(ENC_CLK);
+
+  showBoot();
+}
+
+// ================= LOOP =================
+void loop() {
+  readEncoder();
+  readIMU();
+  readHeading();
+  readGPS();
+
+  if (menuActive) {
+    drawMenu();
+  } else {
+    switch (currentScreen) {
+      case 0: drawHorizon(); drawOverlay(); break;
+      case 1: drawGPSScreen(); break;
+      case 2: drawInfoScreen(); break;
+    }
+  }
+
+  delay(30);
+}
+
+// ================= IMU =================
+void readIMU() {
+  sensors_event_t accel, gyro, temp;
+  imu.getEvent(&accel, &gyro, &temp);
+
+  float newPitch = atan2(accel.acceleration.x, accel.acceleration.z) * 57.3;
+  float newRoll  = atan2(accel.acceleration.y, accel.acceleration.z) * 57.3;
+
+  float alpha = 0.1;
+  pitch = pitch*(1-alpha) + newPitch*alpha;
+  roll  = roll*(1-alpha) + newRoll*alpha;
+}
+
+// ================= HEADING =================
+void readHeading() {
+  sensors_event_t accel, gyro, temp;
+  imu.getEvent(&accel, &gyro, &temp);
+
+  heading += gyro.gyro.z;
+  heading = fmod(heading, 360);
+  if (heading < 0) heading += 360;
+}
+
+// ================= GPS =================
+void readGPS() {
+  while (gpsSerial.available()) {
+    gps.encode(gpsSerial.read());
+  }
+  gpsFix = gps.location.isValid();
+  if (gpsFix) speed_kmh = gps.speed.kmph();
+}
+
+// ================= ENCODER =================
+void readEncoder() {
+  int currentCLK = digitalRead(ENC_CLK);
+
+  if (currentCLK != lastCLK && currentCLK == LOW) {
+    if (digitalRead(ENC_DT) != currentCLK) menuIndex++;
+    else menuIndex--;
+
+    if (menuIndex < 0) menuIndex = menuSize-1;
+    if (menuIndex >= menuSize) menuIndex = 0;
+  }
+
+  lastCLK = currentCLK;
+
+  if (digitalRead(ENC_SW) == LOW) {
+    delay(150);
+
+    if (menuActive) {
+      handleMenu();
+      menuActive = false;
+    } else {
+      menuActive = true;
+    }
+  }
+}
+
+// ================= MENU =================
+void drawMenu() {
+  hud->fillScreen(RGB565_BLACK);
+
+  int target = menuIndex * 30;
+  menuOffset += (target - menuOffset) * 0.3;
+
+  for (int i = 0; i < menuSize; i++) {
+    int y = 50 + (i*30) - menuOffset;
+
+    if (i == menuIndex)
+      hud->setTextColor(RGB565_YELLOW);
+    else
+      hud->setTextColor(RGB565_WHITE);
+
+    drawIcon(40, y+10, i);
+
+    hud->setCursor(70, y);
+    hud->print(menuItems[i]);
+  }
+
+  hud->flush();
+}
+
+void drawIcon(int x,int y,int type){
+  switch(type){
+    case 0: hud->drawLine(x-5,y,x+5,y,RGB565_WHITE); break;
+    case 1: hud->drawCircle(x,y,4,RGB565_GREEN); break;
+    case 2: hud->drawCircle(x,y,5,RGB565_WHITE); break;
+    case 3: hud->drawFastHLine(x-5,y,10,RGB565_YELLOW); break;
+  }
+}
+
+void handleMenu(){
+  screenTransition();
+
+  switch(menuIndex){
+    case 0: currentScreen=0; break;
+    case 1: currentScreen=1; break;
+    case 2: currentScreen=2; break;
+    case 3: calibrate(); break;
+  }
+}
+
+// ================= TRANSITION =================
+void screenTransition(){
+  for(int i=0;i<320;i+=20){
+    gfx->fillScreen(RGB565_BLACK);
+    gfx->fillRect(i,0,320,480,RGB565_WHITE);
+    delay(5);
+  }
+}
+
+// ================= CAL =================
+void calibrate(){
+  pitchOffset=pitch;
+  rollOffset=roll;
+}
+
+// ================= HORIZON =================
+void drawHorizon(){
+  int cx=160, cy=240;
+
+  float r=(roll-rollOffset)*DEG_TO_RAD;
+  int p=(pitch-pitchOffset)*3;
+
+  int len=500;
+
+  int x1=cx-len*cos(r);
+  int y1=cy-len*sin(r)+p;
+  int x2=cx+len*cos(r);
+  int y2=cy+len*sin(r)+p;
+
+  gfx->fillRect(0,0,320,240,RGB565_BLUE);
+
+  for(int y=0;y<480;y+=3){
+    int x=(y-y1)*(x2-x1)/(y2-y1+1)+x1;
+    if(y>y1)
+      gfx->drawFastHLine(x,y,320-x,COLOR_BROWN);
+    else
+      gfx->drawFastHLine(0,y,x,COLOR_DARKGREEN);
+  }
+
+  gfx->drawLine(x1,y1,x2,y2,RGB565_WHITE);
+
+  drawJeep(cx,cy);
+}
+
+// ================= JEEP =================
+void drawJeep(int cx,int cy){
+  int x=cx-35; int y=cy-25;
+
+  gfx->fillRect(x+10,y+18,60,20,RGB565_YELLOW);
+  gfx->fillRect(x+20,y+8,30,10,RGB565_YELLOW);
+
+  gfx->fillCircle(x+20,y+40,9,RGB565_BLACK);
+  gfx->fillCircle(x+60,y+40,9,RGB565_BLACK);
+}
+
+// ================= OVERLAY =================
+void drawOverlay(){
+  hud->fillScreen(RGB565_BLACK);
+
+  // Numbers enlarged from size 2 -> size 3 for better readability
+  hud->setTextSize(3);
+  hud->setTextColor(RGB565_WHITE);
+
+  hud->setCursor(10,10);
+  hud->print("HDG:");
+  hud->print((int)heading);
+
+  hud->setCursor(150,10);
+  if(gpsFix) {
+    hud->setTextColor(RGB565_GREEN);
+    hud->print(speed_kmh);
+  } else {
+    hud->setTextColor(RGB565_RED);
+    hud->print("NO GPS");
+  }
+
+  hud->setTextColor(RGB565_WHITE);
+
+  hud->setCursor(10,50);
+  hud->print("R:");
+  hud->print(roll,1);
+
+  hud->setCursor(150,50);
+  hud->print("P:");
+  hud->print(pitch,1);
+
+  if(abs(roll)>35||abs(pitch)>35){
+    hud->setTextColor(RGB565_RED);
+    // DANGER text enlarged from size 3 -> size 4
+    hud->setTextSize(4);
+    hud->setCursor(100,20);
+    hud->print("DANGER");
+  }
+
+  hud->flush();
+}
+
+// ================= SCREENS =================
+void drawGPSScreen(){
+  gfx->fillScreen(RGB565_BLACK);
+  // Speed readout enlarged from size 3 -> size 4
+  gfx->setTextSize(4);
+  gfx->setTextColor(RGB565_WHITE);
+  gfx->setCursor(40,150);
+  gfx->print(speed_kmh);
+}
+
+void drawInfoScreen(){
+  gfx->fillScreen(RGB565_BLACK);
+  // Numbers enlarged from size 2 -> size 3
+  gfx->setTextSize(3);
+  gfx->setTextColor(RGB565_WHITE);
+
+  gfx->setCursor(40,120);
+  gfx->print("Pitch:");
+  gfx->print(pitch,1);
+
+  gfx->setCursor(40,170);
+  gfx->print("Roll:");
+  gfx->print(roll,1);
+
+  gfx->setCursor(40,220);
+  gfx->print("Head:");
+  gfx->print(heading);
+}
+
+// ================= BOOT =================
+void showBoot(){
+  gfx->fillScreen(RGB565_BLACK);
+
+  gfx->setTextSize(3);
+  gfx->setTextColor(RGB565_GREEN);
+
+  gfx->setCursor(60,150);
+  gfx->print("WRANGLER");
+
+  gfx->setCursor(40,200);
+  gfx->print("SYSTEM");
+
+  delay(2000);
+}
+
