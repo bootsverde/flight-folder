@@ -253,8 +253,8 @@ void readTouch() {
   ts.read();
   bool touching = ts.isTouched && ts.touches > 0;
   if (touching) {
-    tapX = ts.points[0].x;
-    tapY = ts.points[0].y;
+    tapX = constrain(map(ts.points[0].x, 760, 86, 0, 799), 0, 799);
+    tapY = constrain(map(ts.points[0].y, 427, 60, 0, 479), 0, 479);
     touchDown = true;
   } else if (touchDown) {
     touchTap = true;
@@ -277,8 +277,14 @@ void processTouch() {
     return;
   }
 
-  // MENU button on non-horizon screens
-  if (currentScreen != 0 && tapX < 100 && tapY > 430) {
+  // BACK button (top-right) on any sub-screen -> HUD
+  if (currentScreen != 0 && tapX >= 620 && tapY <= 70) {
+    currentScreen = 0;
+    return;
+  }
+
+  // MENU button (bottom-left) on non-horizon screens
+  if (currentScreen != 0 && tapX < 180 && tapY > 410) {
     menuActive = true;
     return;
   }
@@ -291,18 +297,19 @@ void processTouch() {
 
   // Calibrate screen controls
   if (currentScreen == 3) {
-    if (tapX >= 560 && tapX <= 630 && tapY >= 115 && tapY <= 165) {
-      seaLevelPressure_hPa -= 1.0f; return;
+    // QNH row (y 80..170)
+    if (tapY >= 80 && tapY < 170) {
+      if (tapX < 400) { seaLevelPressure_hPa -= 1.0f; return; }
+      else            { seaLevelPressure_hPa += 1.0f; return; }
     }
-    if (tapX >= 645 && tapX <= 715 && tapY >= 115 && tapY <= 165) {
-      seaLevelPressure_hPa += 1.0f; return;
-    }
-    if (tapY >= 195 && tapY < 295) {
+    // LEVEL row (y 180..290)
+    if (tapY >= 180 && tapY < 290) {
       pitchOffset = pitch;
       rollOffset = roll;
       return;
     }
-    if (tapY >= 295 && tapY < 395) {
+    // HEADING row (y 300..410)
+    if (tapY >= 300 && tapY < 410) {
       heading = 0;
       return;
     }
@@ -311,12 +318,20 @@ void processTouch() {
 
 // ==================== DRAW: MENU ====================
 void drawMenuButton() {
-  canvas->fillRect(0, 430, 100, 50, canvas->color565(30, 30, 30));
-  canvas->drawRect(0, 430, 100, 50, canvas->color565(80, 80, 80));
-  canvas->setTextSize(2);
+  // MENU bottom-left
+  canvas->fillRoundRect(0, 415, 170, 65, 10, canvas->color565(30, 30, 30));
+  canvas->drawRoundRect(0, 415, 170, 65, 10, RGB565_WHITE);
+  canvas->setTextSize(3);
   canvas->setTextColor(RGB565_WHITE);
-  canvas->setCursor(12, 447);
+  canvas->setCursor(30, 430);
   canvas->print("MENU");
+
+  // BACK top-right
+  canvas->fillRoundRect(620, 10, 170, 55, 10, canvas->color565(40, 40, 40));
+  canvas->drawRoundRect(620, 10, 170, 55, 10, RGB565_WHITE);
+  canvas->setTextColor(RGB565_WHITE);
+  canvas->setCursor(650, 22);
+  canvas->print("< BACK");
 }
 
 void drawMenu() {
@@ -575,6 +590,12 @@ void drawOverlay() {
   canvas->setTextColor(gpsFix ? RGB565_GREEN : RGB565_RED);
   canvas->setCursor(700, 80);
   canvas->print(gpsFix ? "GPS" : "---");
+
+  // touch debug
+  canvas->setTextSize(2);
+  canvas->setTextColor(RGB565_RED);
+  canvas->setCursor(250, 460);
+  canvas->printf("X:%d Y:%d %s", tapX, tapY, touchDown ? "DN" : "  ");
 }
 
 // ==================== DRAW: GPS SCREEN ====================
@@ -652,56 +673,80 @@ void drawInfoScreen() {
 void drawCalibrateScreen() {
   canvas->fillScreen(RGB565_BLACK);
 
+  // title
   canvas->setTextSize(4);
   canvas->setTextColor(RGB565_YELLOW);
-  canvas->setCursor(40, 20);
+  canvas->setCursor(40, 22);
   canvas->print("CALIBRATE");
 
-  // QNH row
-  canvas->drawFastHLine(0, 110, 800, canvas->color565(60, 60, 60));
+  // BACK button top-right (shared)
+  canvas->fillRoundRect(620, 10, 170, 55, 10, canvas->color565(40, 40, 40));
+  canvas->drawRoundRect(620, 10, 170, 55, 10, RGB565_WHITE);
   canvas->setTextSize(3);
   canvas->setTextColor(RGB565_WHITE);
-  canvas->setCursor(40, 125);
-  canvas->print("QNH");
-  canvas->setTextColor(RGB565_YELLOW);
-  canvas->setCursor(200, 125);
-  canvas->printf("%.1f hPa", seaLevelPressure_hPa);
+  canvas->setCursor(650, 22);
+  canvas->print("< BACK");
 
-  canvas->fillRoundRect(560, 115, 70, 50, 8, canvas->color565(70, 20, 20));
-  canvas->drawRoundRect(560, 115, 70, 50, 8, RGB565_RED);
+  // ---- QNH row (y 80..170) ----
+  canvas->drawFastHLine(0, 80, 800, canvas->color565(60, 60, 60));
+
+  // left half = minus, right half = plus
+  canvas->fillRoundRect(10, 88, 385, 74, 10, canvas->color565(50, 15, 15));
+  canvas->drawRoundRect(10, 88, 385, 74, 10, RGB565_RED);
+  canvas->fillRoundRect(405, 88, 385, 74, 10, canvas->color565(15, 50, 15));
+  canvas->drawRoundRect(405, 88, 385, 74, 10, RGB565_GREEN);
+
   canvas->setTextSize(4);
   canvas->setTextColor(RGB565_WHITE);
-  canvas->setCursor(582, 125);
-  canvas->print("-");
+  canvas->setCursor(30, 102);
+  canvas->print("QNH  -");
 
-  canvas->fillRoundRect(645, 115, 70, 50, 8, canvas->color565(20, 70, 20));
-  canvas->drawRoundRect(645, 115, 70, 50, 8, RGB565_GREEN);
-  canvas->setCursor(663, 125);
-  canvas->print("+");
+  canvas->setCursor(425, 102);
+  canvas->print("QNH  +");
 
-  // Zero Pitch/Roll row
-  canvas->drawFastHLine(0, 195, 800, canvas->color565(60, 60, 60));
+  // current value centered
   canvas->setTextSize(3);
-  canvas->setTextColor(RGB565_WHITE);
-  canvas->setCursor(40, 215);
-  canvas->print("Zero Pitch/Roll");
-  canvas->setTextSize(2);
-  canvas->setTextColor(canvas->color565(120, 120, 120));
-  canvas->setCursor(40, 250);
-  canvas->printf("current: P=%.1f  R=%.1f", pitch - pitchOffset, roll - rollOffset);
+  canvas->setTextColor(RGB565_YELLOW);
+  canvas->setCursor(280, 140);
+  canvas->printf("%.1f hPa", seaLevelPressure_hPa);
 
-  // Zero Heading row
-  canvas->drawFastHLine(0, 295, 800, canvas->color565(60, 60, 60));
+  // ---- LEVEL row (y 180..290) ----
+  canvas->drawFastHLine(0, 180, 800, canvas->color565(60, 60, 60));
+  canvas->fillRoundRect(10, 188, 780, 94, 10, canvas->color565(20, 20, 60));
+  canvas->drawRoundRect(10, 188, 780, 94, 10, RGB565_CYAN);
+
+  canvas->setTextSize(4);
+  canvas->setTextColor(RGB565_WHITE);
+  canvas->setCursor(30, 200);
+  canvas->print("LEVEL HORIZON");
+
   canvas->setTextSize(3);
-  canvas->setTextColor(RGB565_WHITE);
-  canvas->setCursor(40, 315);
-  canvas->print("Zero Heading");
-  canvas->setTextSize(2);
-  canvas->setTextColor(canvas->color565(120, 120, 120));
-  canvas->setCursor(40, 350);
-  canvas->printf("current: %.0f%s", heading, magOk ? " (MAG)" : " (GYRO)");
+  canvas->setTextColor(RGB565_YELLOW);
+  canvas->setCursor(30, 248);
+  canvas->printf("P: %.1f   R: %.1f", pitch - pitchOffset, roll - rollOffset);
 
-  canvas->drawFastHLine(0, 395, 800, canvas->color565(60, 60, 60));
+  // ---- HEADING row (y 300..410) ----
+  canvas->drawFastHLine(0, 300, 800, canvas->color565(60, 60, 60));
+  canvas->fillRoundRect(10, 308, 780, 94, 10, canvas->color565(20, 20, 60));
+  canvas->drawRoundRect(10, 308, 780, 94, 10, RGB565_CYAN);
+
+  canvas->setTextSize(4);
+  canvas->setTextColor(RGB565_WHITE);
+  canvas->setCursor(30, 320);
+  canvas->print("ZERO HEADING");
+
+  canvas->setTextSize(3);
+  canvas->setTextColor(RGB565_YELLOW);
+  canvas->setCursor(30, 368);
+  canvas->printf("HDG: %.0f  %s", heading, magOk ? "(MAG)" : "(GYRO)");
+
+  canvas->drawFastHLine(0, 415, 800, canvas->color565(60, 60, 60));
+
+  // touch debug
+  canvas->setTextSize(2);
+  canvas->setTextColor(RGB565_RED);
+  canvas->setCursor(300, 450);
+  canvas->printf("X:%d Y:%d %s", tapX, tapY, touchDown ? "DN" : "  ");
 
   drawMenuButton();
 }
@@ -853,4 +898,5 @@ void loop() {
   }
 
   canvas->flush();
+  delay(30);
 }
