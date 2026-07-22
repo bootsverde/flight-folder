@@ -1,8 +1,16 @@
 import math
 import sys
+import threading
 import time
 
 import pygame
+
+try:
+    from sensors import Sensors
+except Exception:
+    Sensors = None
+
+sensor_reader = None
 
 # ==================== COLORS ====================
 COLOR_GROUND = (90, 60, 30)
@@ -41,7 +49,7 @@ menu_items = ["Horizon", "GPS", "Info", "Calibrate"]
 
 
 def update_simulated_data(t):
-    """Placeholder data source. Swap this out for real serial reads from the ESP32."""
+    """Fallback data source, used when no I2C sensors are found (e.g. on a dev machine)."""
     state["pitch"] = 15 * math.sin(t * 0.3)
     state["roll"] = 25 * math.sin(t * 0.5 + 1)
     state["heading"] = (t * 10) % 360
@@ -51,6 +59,27 @@ def update_simulated_data(t):
     state["sats"] = 8 if state["gps_fix"] else 0
     state["lat"] = 45.678900 + 0.0005 * math.sin(t * 0.05)
     state["lon"] = -110.123400 + 0.0005 * math.cos(t * 0.05)
+
+
+def sensor_loop(reader):
+    """Runs on a background thread, continuously refreshing `state` from the I2C sensors."""
+    while True:
+        reader.update()
+        state["pitch"] = reader.pitch
+        state["roll"] = reader.roll
+        state["heading"] = reader.heading
+        state["altitude_m"] = reader.altitude_m
+        state["speed_mph"] = reader.speed_mph
+        state["gps_fix"] = reader.gps_fix
+        state["sats"] = reader.sats
+        state["lat"] = reader.lat
+        state["lon"] = reader.lon
+        state["qnh"] = reader.sea_level_hpa
+        state["imu_ok"] = reader.imu_ok
+        state["mag_ok"] = reader.mag_ok
+        state["bmp_ok"] = reader.bmp_ok
+        state["gps_ok"] = reader.gps_ok
+        time.sleep(0.02)
 
 
 def draw_menu_button(surf, font_big, W, H):
@@ -407,13 +436,31 @@ def handle_tap(x, y, W, H):
 
     if current_screen == 3:
         if 88 <= y < 162:
-            if x < W / 2:
-                state["qnh"] -= 1.0
+            delta = -1.0 if x < W / 2 else 1.0
+            if sensor_reader is not None:
+                sensor_reader.adjust_qnh(delta)
             else:
-                state["qnh"] += 1.0
+                state["qnh"] += delta
+        elif 188 <= y < 282:
+            if sensor_reader is not None:
+                sensor_reader.zero_horizon()
+        elif 308 <= y < 402:
+            if sensor_reader is not None:
+                sensor_reader.zero_heading()
 
 
 def main():
+    global sensor_reader
+
+    if Sensors is not None:
+        try:
+            sensor_reader = Sensors()
+            sensor_reader.calibrate_gyro()
+            threading.Thread(target=sensor_loop, args=(sensor_reader,), daemon=True).start()
+        except Exception as e:
+            print(f"Sensor init failed, using simulated data: {e}", file=sys.stderr)
+            sensor_reader = None
+
     pygame.init()
     pygame.mouse.set_visible(False)
     screen = pygame.display.set_mode((0, 0), pygame.FULLSCREEN)
@@ -441,8 +488,9 @@ def main():
             elif event.type == pygame.FINGERDOWN:
                 handle_tap(event.x * W, event.y * H, W, H)
 
-        t = time.time() - start
-        update_simulated_data(t)
+        if sensor_reader is None:
+            t = time.time() - start
+            update_simulated_data(t)
 
         if menu_active:
             draw_menu(screen, font_menu, W, H)
