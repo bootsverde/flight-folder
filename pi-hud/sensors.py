@@ -6,6 +6,13 @@ GPIO23/GPIO24 via the i2c-gpio overlay) instead of the header's hardware
 I2C1 (GPIO2/GPIO3), which is already in use by the touchscreen's touch
 controller.
 
+Header pinout (physical pin numbers), sensors run on their own power/ground
+rather than sharing the touchscreen's pins 1/2/4/6:
+    Pin 16 (GPIO23) -> SDA
+    Pin 18 (GPIO24) -> SCL
+    Pin 17 (3.3V)   -> VCC
+    Pin 20 (GND)    -> GND
+
 Register-level IMU/baro logic mirrors src/main.cpp so the Pi and ESP32
 firmware behave identically.
 """
