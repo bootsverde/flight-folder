@@ -10,18 +10,18 @@
 
 extern "C" void initVariant() {}
 
-// ==================== DISPLAY (Waveshare 4.3" RGB) ====================
+// ==================== DISPLAY (Waveshare 7B RGB, 1024x600) ====================
 Arduino_ESP32RGBPanel *bus = new Arduino_ESP32RGBPanel(
   5, 3, 46, 7,
   1, 2, 42, 41, 40,
   39, 0, 45, 48, 47, 21,
   14, 38, 18, 17, 10,
-  0, 8, 4, 8,
-  0, 8, 4, 8,
-  1, 16000000
+  0, 48, 162, 152,
+  0, 3, 45, 13,
+  1, 12000000
 );
-Arduino_RGB_Display *gfx = new Arduino_RGB_Display(800, 480, bus, 0, true);
-Arduino_Canvas *canvas = new Arduino_Canvas(800, 480, gfx, 0, 0);
+Arduino_RGB_Display *gfx = new Arduino_RGB_Display(1024, 600, bus, 0, true);
+Arduino_Canvas *canvas = new Arduino_Canvas(1024, 600, gfx, 0, 0);
 
 #define COLOR_GROUND canvas->color565(90, 60, 30)
 #define COLOR_SKY    canvas->color565(0, 100, 200)
@@ -37,7 +37,7 @@ Arduino_Canvas *canvas = new Arduino_Canvas(800, 480, gfx, 0, 0);
 
 Adafruit_BMP280 bmp;
 TinyGPSPlus gps;
-TAMC_GT911 ts = TAMC_GT911(8, 9, TOUCH_INT, -1, 800, 480);
+TAMC_GT911 ts = TAMC_GT911(8, 9, TOUCH_INT, -1, 1024, 600);
 
 uint8_t muxAddr = 0;
 bool imuOk = false, magOk = false, bmpOk = false, gpsOk = false;
@@ -259,8 +259,10 @@ void readTouch() {
   ts.read();
   bool touching = ts.isTouched && ts.touches > 0;
   if (touching) {
-    tapX = constrain(map(ts.points[0].x, 760, 86, 0, 799), 0, 799);
-    tapY = constrain(map(ts.points[0].y, 427, 60, 0, 479), 0, 479);
+    // NOTE: raw range proportionally scaled from the 800x480 board's calibration,
+    // not re-measured on this panel. Recalibrate against ts.points[0] raw values if taps land off.
+    tapX = constrain(map(ts.points[0].x, 973, 110, 0, 1023), 0, 1023);
+    tapY = constrain(map(ts.points[0].y, 534, 75, 0, 599), 0, 599);
     touchDown = true;
   } else if (touchDown) {
     touchTap = true;
@@ -273,8 +275,8 @@ void processTouch() {
 
   if (menuActive) {
     for (int i = 0; i < menuSize; i++) {
-      int y = 60 + i * 100;
-      if (tapY >= y && tapY < y + 100) {
+      int y = 75 + i * 125;
+      if (tapY >= y && tapY < y + 125) {
         currentScreen = i;
         menuActive = false;
         return;
@@ -283,33 +285,33 @@ void processTouch() {
     return;
   }
 
-  if (currentScreen != 0 && tapX >= 620 && tapY <= 70) {
+  if (currentScreen != 0 && tapX >= 794 && tapY <= 95) {
     currentScreen = 0;
     return;
   }
 
-  if (currentScreen != 0 && tapX < 180 && tapY > 410) {
+  if (currentScreen != 0 && tapX < 230 && tapY > 519) {
     menuActive = true;
     return;
   }
 
-  if (currentScreen == 0 && tapX < 130 && tapY > 420) {
+  if (currentScreen == 0 && tapX < 175 && tapY > 519) {
     currentScreen = 3;
     return;
   }
 
   if (currentScreen == 3) {
-    if (tapY >= 80 && tapY < 170) {
-      if (tapX < 400) seaLevelPressure_hPa -= 1.0f;
+    if (tapY >= 100 && tapY < 225) {
+      if (tapX < 512) seaLevelPressure_hPa -= 1.0f;
       else            seaLevelPressure_hPa += 1.0f;
       return;
     }
-    if (tapY >= 180 && tapY < 290) {
+    if (tapY >= 225 && tapY < 375) {
       pitchOffset = pitch;
       rollOffset = roll;
       return;
     }
-    if (tapY >= 300 && tapY < 410) {
+    if (tapY >= 375 && tapY < 519) {
       heading = 0;
       return;
     }
@@ -318,37 +320,37 @@ void processTouch() {
 
 // ==================== DRAW: MENU ====================
 void drawMenuButton() {
-  canvas->fillRoundRect(0, 415, 170, 65, 10, canvas->color565(30, 30, 30));
-  canvas->drawRoundRect(0, 415, 170, 65, 10, RGB565_WHITE);
+  canvas->fillRoundRect(0, 519, 218, 81, 12, canvas->color565(30, 30, 30));
+  canvas->drawRoundRect(0, 519, 218, 81, 12, RGB565_WHITE);
   canvas->setTextSize(3);
   canvas->setTextColor(RGB565_WHITE);
-  canvas->setCursor(30, 430);
+  canvas->setCursor(38, 538);
   canvas->print("MENU");
 
-  canvas->fillRoundRect(620, 10, 170, 55, 10, canvas->color565(40, 40, 40));
-  canvas->drawRoundRect(620, 10, 170, 55, 10, RGB565_WHITE);
-  canvas->setCursor(650, 22);
+  canvas->fillRoundRect(794, 13, 218, 69, 12, canvas->color565(40, 40, 40));
+  canvas->drawRoundRect(794, 13, 218, 69, 12, RGB565_WHITE);
+  canvas->setCursor(832, 27);
   canvas->print("< BACK");
 }
 
 void drawMenu() {
   canvas->fillScreen(RGB565_BLACK);
   for (int i = 0; i < menuSize; i++) {
-    int y = 60 + i * 100;
+    int y = 75 + i * 125;
     if (i == currentScreen)
-      canvas->fillRect(0, y, 800, 100, canvas->color565(30, 30, 30));
-    canvas->drawFastHLine(0, y, 800, canvas->color565(60, 60, 60));
+      canvas->fillRect(0, y, 1024, 125, canvas->color565(30, 30, 30));
+    canvas->drawFastHLine(0, y, 1024, canvas->color565(60, 60, 60));
     canvas->setTextSize(4);
     canvas->setTextColor(i == currentScreen ? RGB565_YELLOW : RGB565_WHITE);
-    canvas->setCursor(90, y + 30);
+    canvas->setCursor(115, y + 38);
     canvas->print(menuItems[i]);
   }
-  canvas->drawFastHLine(0, 60 + menuSize * 100, 800, canvas->color565(60, 60, 60));
+  canvas->drawFastHLine(0, 75 + menuSize * 125, 1024, canvas->color565(60, 60, 60));
 }
 
 // ==================== DRAW: HORIZON ====================
 void drawHorizon() {
-  const int W = 800, H = 420;
+  const int W = 1024, H = 525;
   int cx = W / 2, cy = H / 2;
 
   float r = (roll - rollOffset) * DEG_TO_RAD;
@@ -374,8 +376,8 @@ void drawHorizon() {
   canvas->drawLine(0, y1, W - 1, y2, RGB565_WHITE);
   canvas->drawLine(0, y1 + 1, W - 1, y2 + 1, RGB565_WHITE);
 
-  const float pxPerDeg = 8.0;
-  const int halfLen = 70, gap = 24;
+  const float pxPerDeg = 10.0;
+  const int halfLen = 90, gap = 31;
 
   for (int pv = -30; pv <= 30; pv += 5) {
     if (pv == 0) continue;
@@ -415,20 +417,20 @@ void drawHorizon() {
     }
   }
 
-  canvas->drawFastHLine(cx - 80, cy, 50, RGB565_YELLOW);
-  canvas->drawFastHLine(cx - 80, cy + 1, 50, RGB565_YELLOW);
-  canvas->drawFastHLine(cx + 30, cy, 50, RGB565_YELLOW);
-  canvas->drawFastHLine(cx + 30, cy + 1, 50, RGB565_YELLOW);
-  canvas->drawFastVLine(cx - 30, cy, 8, RGB565_YELLOW);
-  canvas->drawFastVLine(cx + 30, cy, 8, RGB565_YELLOW);
-  canvas->fillRect(cx - 3, cy - 1, 6, 4, RGB565_YELLOW);
+  canvas->drawFastHLine(cx - 102, cy, 64, RGB565_YELLOW);
+  canvas->drawFastHLine(cx - 102, cy + 1, 64, RGB565_YELLOW);
+  canvas->drawFastHLine(cx + 38, cy, 64, RGB565_YELLOW);
+  canvas->drawFastHLine(cx + 38, cy + 1, 64, RGB565_YELLOW);
+  canvas->drawFastVLine(cx - 38, cy, 10, RGB565_YELLOW);
+  canvas->drawFastVLine(cx + 38, cy, 10, RGB565_YELLOW);
+  canvas->fillRect(cx - 4, cy - 1, 8, 5, RGB565_YELLOW);
 }
 
 // ==================== DRAW: ROLL TAPE (left) ====================
 void drawRollTape() {
-  const int tapeW = 120, tapeH = 420;
+  const int tapeW = 160, tapeH = 525;
   const int cy = tapeH / 2;
-  const float scale = 5.0;
+  const float scale = 6.25;
 
   canvas->fillRect(0, 0, tapeW, tapeH, COLOR_TAPE);
   canvas->drawFastVLine(tapeW, 0, tapeH, COLOR_BORDER);
@@ -440,13 +442,13 @@ void drawRollTape() {
     if (y < 0 || y >= tapeH) continue;
 
     bool major = (deg % 10 == 0);
-    int tickLen = major ? 25 : 12;
+    int tickLen = major ? 32 : 15;
     canvas->drawFastHLine(tapeW - tickLen, y, tickLen, COLOR_BORDER);
 
     if (major) {
       canvas->setTextSize(2);
       canvas->setTextColor(RGB565_WHITE);
-      canvas->setCursor(tapeW - tickLen - 36, y - 7);
+      canvas->setCursor(tapeW - tickLen - 46, y - 7);
       canvas->print(deg);
     }
   }
@@ -471,10 +473,10 @@ void drawRollTape() {
 
 // ==================== DRAW: ALTITUDE TAPE (right) ====================
 void drawAltitudeTape() {
-  const int tapeW = 120, tapeH = 420;
-  const int tapeX = 800 - tapeW;
+  const int tapeW = 160, tapeH = 525;
+  const int tapeX = 1024 - tapeW;
   const int cy = tapeH / 2;
-  const float scale = 2.0;
+  const float scale = 2.5;
 
   canvas->fillRect(tapeX, 0, tapeW, tapeH, COLOR_TAPE);
   canvas->drawFastVLine(tapeX - 1, 0, tapeH, COLOR_BORDER);
@@ -487,7 +489,7 @@ void drawAltitudeTape() {
     if (y < 0 || y >= tapeH) continue;
 
     bool major = (ft % 100 == 0);
-    int tickLen = major ? 25 : 12;
+    int tickLen = major ? 32 : 15;
     canvas->drawFastHLine(tapeX, y, tickLen, COLOR_BORDER);
 
     if (major) {
@@ -516,20 +518,20 @@ void drawAltitudeTape() {
 
 // ==================== DRAW: HEADING BAR (bottom) ====================
 void drawHeadingTape() {
-  const int barY = 420, barH = 60;
-  const int cx = 400;
-  const float pxPerDeg = 4.0;
+  const int barY = 525, barH = 75;
+  const int cx = 512;
+  const float pxPerDeg = 5.0;
 
-  canvas->fillRect(0, barY, 800, barH, COLOR_TAPE);
-  canvas->drawFastHLine(0, barY, 800, COLOR_BORDER);
+  canvas->fillRect(0, barY, 1024, barH, COLOR_TAPE);
+  canvas->drawFastHLine(0, barY, 1024, COLOR_BORDER);
 
   for (int b = -60; b <= 60; b++) {
     int deg = (int)(heading + b + 360) % 360;
     int x = cx + (int)(b * pxPerDeg);
-    if (x < 0 || x >= 800) continue;
+    if (x < 0 || x >= 1024) continue;
 
     if (deg % 30 == 0) {
-      canvas->drawFastVLine(x, barY + 2, 18, RGB565_WHITE);
+      canvas->drawFastVLine(x, barY + 2, 22, RGB565_WHITE);
       const char* label = "";
       switch (deg) {
         case 0:   label = "N"; break;
@@ -540,26 +542,26 @@ void drawHeadingTape() {
       if (label[0]) {
         canvas->setTextSize(2);
         canvas->setTextColor(RGB565_GREEN);
-        canvas->setCursor(x - 6, barY + 22);
+        canvas->setCursor(x - 6, barY + 28);
         canvas->print(label);
       } else {
         canvas->setTextSize(2);
         canvas->setTextColor(RGB565_WHITE);
-        canvas->setCursor(x - 12, barY + 22);
+        canvas->setCursor(x - 12, barY + 28);
         canvas->print(deg);
       }
     } else if (deg % 10 == 0) {
-      canvas->drawFastVLine(x, barY + 2, 10, COLOR_BORDER);
+      canvas->drawFastVLine(x, barY + 2, 12, COLOR_BORDER);
     }
   }
 
   canvas->fillTriangle(cx, barY + 1, cx - 8, barY - 8, cx + 8, barY - 8, RGB565_WHITE);
 
-  canvas->fillRect(cx - 30, barY + 38, 60, 22, RGB565_BLACK);
-  canvas->drawRect(cx - 30, barY + 38, 60, 22, RGB565_WHITE);
+  canvas->fillRect(cx - 30, barY + 46, 60, 26, RGB565_BLACK);
+  canvas->drawRect(cx - 30, barY + 46, 60, 26, RGB565_WHITE);
   canvas->setTextSize(2);
   canvas->setTextColor(RGB565_GREEN);
-  canvas->setCursor(cx - 18, barY + 41);
+  canvas->setCursor(cx - 18, barY + 50);
   canvas->printf("%03d", (int)heading % 360);
 }
 
@@ -568,24 +570,24 @@ void drawOverlay() {
   if (abs(roll - rollOffset) > 35 || abs(pitch - pitchOffset) > 35) {
     canvas->setTextColor(RGB565_RED);
     canvas->setTextSize(4);
-    canvas->setCursor(250, 10);
+    canvas->setCursor(320, 10);
     canvas->print("! DANGER !");
   }
 
-  canvas->fillRoundRect(30, 430, 90, 50, 6, canvas->color565(40, 40, 40));
-  canvas->drawRoundRect(30, 430, 90, 50, 6, COLOR_BORDER);
+  canvas->fillRoundRect(38, 538, 115, 63, 8, canvas->color565(40, 40, 40));
+  canvas->drawRoundRect(38, 538, 115, 63, 8, COLOR_BORDER);
   canvas->setTextSize(3);
   canvas->setTextColor(RGB565_WHITE);
-  canvas->setCursor(42, 440);
+  canvas->setCursor(53, 551);
   canvas->print("CAL");
 
   canvas->setTextSize(1);
   canvas->setTextColor(gpsFix ? RGB565_GREEN : COLOR_DIM);
-  canvas->setCursor(750, 425);
+  canvas->setCursor(960, 531);
   canvas->print(gpsFix ? "GPS" : "---");
 
   canvas->setTextColor(magOk ? RGB565_GREEN : COLOR_DIM);
-  canvas->setCursor(710, 425);
+  canvas->setCursor(909, 531);
   canvas->print(magOk ? "MAG" : "GYR");
 }
 
@@ -595,32 +597,32 @@ void drawGPSScreen() {
 
   canvas->setTextSize(4);
   canvas->setTextColor(RGB565_CYAN);
-  canvas->setCursor(40, 30);
+  canvas->setCursor(51, 38);
   canvas->print("GPS");
 
   canvas->setTextSize(3);
   if (gpsFix) {
     canvas->setTextColor(RGB565_GREEN);
-    canvas->setCursor(200, 30);
+    canvas->setCursor(256, 38);
     canvas->print("FIX");
 
     canvas->setTextColor(RGB565_WHITE);
-    canvas->setCursor(40, 110);
+    canvas->setCursor(51, 138);
     canvas->printf("LAT: %.6f", gps.location.lat());
-    canvas->setCursor(40, 160);
+    canvas->setCursor(51, 200);
     canvas->printf("LON: %.6f", gps.location.lng());
-    canvas->setCursor(40, 240);
+    canvas->setCursor(51, 300);
     canvas->printf("SPD: %.1f mph", speed_mph);
-    canvas->setCursor(40, 290);
+    canvas->setCursor(51, 363);
     canvas->printf("ALT: %d ft", (int)(altitude_m * 3.28084f));
   } else {
     canvas->setTextColor(RGB565_RED);
-    canvas->setCursor(200, 30);
+    canvas->setCursor(256, 38);
     canvas->print("NO FIX");
   }
 
   canvas->setTextColor(RGB565_WHITE);
-  canvas->setCursor(40, 390);
+  canvas->setCursor(51, 488);
   canvas->printf("SATS: %d", gps.satellites.value());
 
   drawMenuButton();
@@ -632,25 +634,25 @@ void drawInfoScreen() {
 
   canvas->setTextSize(4);
   canvas->setTextColor(RGB565_CYAN);
-  canvas->setCursor(40, 20);
+  canvas->setCursor(51, 25);
   canvas->print("INFO");
 
   canvas->setTextSize(3);
   canvas->setTextColor(RGB565_WHITE);
-  canvas->setCursor(40, 100);
+  canvas->setCursor(51, 125);
   canvas->printf("Pitch: %.1f", pitch - pitchOffset);
-  canvas->setCursor(40, 150);
+  canvas->setCursor(51, 188);
   canvas->printf("Roll:  %.1f", roll - rollOffset);
-  canvas->setCursor(40, 200);
+  canvas->setCursor(51, 250);
   canvas->printf("Hdg:   %.0f", heading);
-  canvas->setCursor(40, 280);
+  canvas->setCursor(51, 350);
   canvas->printf("Alt:   %d ft", (int)(altitude_m * 3.28084f));
-  canvas->setCursor(40, 330);
+  canvas->setCursor(51, 413);
   canvas->printf("QNH:   %.1f hPa", seaLevelPressure_hPa);
 
   canvas->setTextSize(2);
   canvas->setTextColor(COLOR_DIM);
-  canvas->setCursor(40, 400);
+  canvas->setCursor(51, 500);
   canvas->printf("IMU:%s  MAG:%s  BARO:%s  GPS:%s",
     imuOk ? "OK" : "--", magOk ? "OK" : "--",
     bmpOk ? "OK" : "--", gpsOk ? "OK" : "--");
@@ -664,52 +666,52 @@ void drawCalibrateScreen() {
 
   canvas->setTextSize(4);
   canvas->setTextColor(RGB565_YELLOW);
-  canvas->setCursor(40, 22);
+  canvas->setCursor(51, 28);
   canvas->print("CALIBRATE");
 
-  canvas->drawFastHLine(0, 80, 800, canvas->color565(60, 60, 60));
-  canvas->fillRoundRect(10, 88, 385, 74, 10, canvas->color565(50, 15, 15));
-  canvas->drawRoundRect(10, 88, 385, 74, 10, RGB565_RED);
-  canvas->fillRoundRect(405, 88, 385, 74, 10, canvas->color565(15, 50, 15));
-  canvas->drawRoundRect(405, 88, 385, 74, 10, RGB565_GREEN);
+  canvas->drawFastHLine(0, 100, 1024, canvas->color565(60, 60, 60));
+  canvas->fillRoundRect(13, 110, 493, 93, 12, canvas->color565(50, 15, 15));
+  canvas->drawRoundRect(13, 110, 493, 93, 12, RGB565_RED);
+  canvas->fillRoundRect(519, 110, 493, 93, 12, canvas->color565(15, 50, 15));
+  canvas->drawRoundRect(519, 110, 493, 93, 12, RGB565_GREEN);
 
   canvas->setTextSize(4);
   canvas->setTextColor(RGB565_WHITE);
-  canvas->setCursor(30, 102);
+  canvas->setCursor(39, 128);
   canvas->print("QNH  -");
-  canvas->setCursor(425, 102);
+  canvas->setCursor(545, 128);
   canvas->print("QNH  +");
 
   canvas->setTextSize(3);
   canvas->setTextColor(RGB565_YELLOW);
-  canvas->setCursor(280, 140);
+  canvas->setCursor(358, 175);
   canvas->printf("%.1f hPa", seaLevelPressure_hPa);
 
-  canvas->drawFastHLine(0, 180, 800, canvas->color565(60, 60, 60));
-  canvas->fillRoundRect(10, 188, 780, 94, 10, canvas->color565(20, 20, 60));
-  canvas->drawRoundRect(10, 188, 780, 94, 10, RGB565_CYAN);
+  canvas->drawFastHLine(0, 225, 1024, canvas->color565(60, 60, 60));
+  canvas->fillRoundRect(13, 235, 998, 118, 12, canvas->color565(20, 20, 60));
+  canvas->drawRoundRect(13, 235, 998, 118, 12, RGB565_CYAN);
   canvas->setTextSize(4);
   canvas->setTextColor(RGB565_WHITE);
-  canvas->setCursor(30, 200);
+  canvas->setCursor(39, 250);
   canvas->print("LEVEL HORIZON");
   canvas->setTextSize(3);
   canvas->setTextColor(RGB565_YELLOW);
-  canvas->setCursor(30, 248);
+  canvas->setCursor(39, 310);
   canvas->printf("P: %.1f   R: %.1f", pitch - pitchOffset, roll - rollOffset);
 
-  canvas->drawFastHLine(0, 300, 800, canvas->color565(60, 60, 60));
-  canvas->fillRoundRect(10, 308, 780, 94, 10, canvas->color565(20, 20, 60));
-  canvas->drawRoundRect(10, 308, 780, 94, 10, RGB565_CYAN);
+  canvas->drawFastHLine(0, 375, 1024, canvas->color565(60, 60, 60));
+  canvas->fillRoundRect(13, 385, 998, 118, 12, canvas->color565(20, 20, 60));
+  canvas->drawRoundRect(13, 385, 998, 118, 12, RGB565_CYAN);
   canvas->setTextSize(4);
   canvas->setTextColor(RGB565_WHITE);
-  canvas->setCursor(30, 320);
+  canvas->setCursor(39, 400);
   canvas->print("ZERO HEADING");
   canvas->setTextSize(3);
   canvas->setTextColor(RGB565_YELLOW);
-  canvas->setCursor(30, 368);
+  canvas->setCursor(39, 460);
   canvas->printf("HDG: %.0f  %s", heading, magOk ? "(MAG)" : "(GYRO)");
 
-  canvas->drawFastHLine(0, 415, 800, canvas->color565(60, 60, 60));
+  canvas->drawFastHLine(0, 519, 1024, canvas->color565(60, 60, 60));
 
   drawMenuButton();
 }
@@ -736,11 +738,11 @@ void showBoot(int row) {
   canvas->fillScreen(RGB565_BLACK);
   canvas->setTextSize(4);
   canvas->setTextColor(RGB565_GREEN);
-  canvas->setCursor(200, 180);
+  canvas->setCursor(256, 225);
   canvas->print("WRANGLER");
   canvas->setTextSize(3);
   canvas->setTextColor(RGB565_WHITE);
-  canvas->setCursor(260, 240);
+  canvas->setCursor(333, 300);
   canvas->print("rv.3.0");
   canvas->flush();
   delay(2000);
@@ -864,5 +866,8 @@ void loop() {
   }
 
   canvas->flush();
-  delay(30);
+  // Single unbuffered PSRAM framebuffer (no bounce buffer in this toolchain) is
+  // actively DMA-scanned while flush() writes it; keeping loop period >= panel's
+  // ~52ms refresh reduces how often a write collides mid-scan (visible as a shift).
+  delay(50);
 }
