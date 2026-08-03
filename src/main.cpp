@@ -7,6 +7,7 @@
 #include <TAMC_GT911.h>
 #include <Adafruit_BMP280.h>
 #include <TinyGPSPlus.h>
+#include "jeep_bitmap.h"
 
 // ==================== DISPLAY (Waveshare 7B RGB, 1024x600) ====================
 Arduino_ESP32RGBPanel *bus = new Arduino_ESP32RGBPanel(
@@ -26,6 +27,7 @@ Arduino_Canvas *canvas = new Arduino_Canvas(1024, 600, gfx, 0, 0);
 #define COLOR_TAPE   canvas->color565(28, 28, 28)
 #define COLOR_BORDER canvas->color565(80, 80, 80)
 #define COLOR_DIM    canvas->color565(120, 120, 120)
+#define COLOR_JEEP   canvas->color565(255, 140, 0)
 
 // ==================== HARDWARE ====================
 #define IMU_ADDR     0x68
@@ -415,13 +417,7 @@ void drawHorizon() {
     }
   }
 
-  canvas->drawFastHLine(cx - 102, cy, 64, RGB565_YELLOW);
-  canvas->drawFastHLine(cx - 102, cy + 1, 64, RGB565_YELLOW);
-  canvas->drawFastHLine(cx + 38, cy, 64, RGB565_YELLOW);
-  canvas->drawFastHLine(cx + 38, cy + 1, 64, RGB565_YELLOW);
-  canvas->drawFastVLine(cx - 38, cy, 10, RGB565_YELLOW);
-  canvas->drawFastVLine(cx + 38, cy, 10, RGB565_YELLOW);
-  canvas->fillRect(cx - 4, cy - 1, 8, 5, RGB565_YELLOW);
+  canvas->drawBitmap(cx - JEEP_W / 2, cy - JEEP_H / 2, jeep_bitmap, JEEP_W, JEEP_H, COLOR_JEEP);
 }
 
 // ==================== DRAW: ROLL TAPE (left) ====================
@@ -519,36 +515,32 @@ void drawHeadingTape() {
   const int barY = 525, barH = 75;
   const int cx = 512;
   const float pxPerDeg = 5.0;
+  static const char* compassNames[16] = {
+    "N", "NNE", "NE", "ENE", "E", "ESE", "SE", "SSE",
+    "S", "SSW", "SW", "WSW", "W", "WNW", "NW", "NNW"
+  };
 
   canvas->fillRect(0, barY, 1024, barH, COLOR_TAPE);
   canvas->drawFastHLine(0, barY, 1024, COLOR_BORDER);
 
-  for (int b = -60; b <= 60; b++) {
-    int deg = (int)(heading + b + 360) % 360;
-    int x = cx + (int)(b * pxPerDeg);
+  // Steps of 7.5 deg so every 3rd step lands exactly on a 22.5 deg (16-point) compass mark.
+  for (int n = -8; n <= 8; n++) {
+    float angleOffset = n * 7.5f;
+    int x = cx + (int)(angleOffset * pxPerDeg);
     if (x < 0 || x >= 1024) continue;
 
-    if (deg % 30 == 0) {
+    if (n % 3 == 0) {
+      float degF = fmod(heading + angleOffset + 360.0f, 360.0f);
+      int idx = ((int)round(degF / 22.5f)) % 16;
+      const char* label = compassNames[idx];
+      int len = strlen(label);
+
       canvas->drawFastVLine(x, barY + 2, 22, RGB565_WHITE);
-      const char* label = "";
-      switch (deg) {
-        case 0:   label = "N"; break;
-        case 90:  label = "E"; break;
-        case 180: label = "S"; break;
-        case 270: label = "W"; break;
-      }
-      if (label[0]) {
-        canvas->setTextSize(2);
-        canvas->setTextColor(RGB565_GREEN);
-        canvas->setCursor(x - 6, barY + 28);
-        canvas->print(label);
-      } else {
-        canvas->setTextSize(2);
-        canvas->setTextColor(RGB565_WHITE);
-        canvas->setCursor(x - 12, barY + 28);
-        canvas->print(deg);
-      }
-    } else if (deg % 10 == 0) {
+      canvas->setTextSize(2);
+      canvas->setTextColor((idx % 4 == 0) ? RGB565_GREEN : RGB565_WHITE);
+      canvas->setCursor(x - len * 6, barY + 28);
+      canvas->print(label);
+    } else {
       canvas->drawFastVLine(x, barY + 2, 12, COLOR_BORDER);
     }
   }
