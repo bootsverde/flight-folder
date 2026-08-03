@@ -428,7 +428,7 @@ void drawHorizon() {
 
 // ==================== DRAW: ROLL TAPE (left) ====================
 void drawRollTape() {
-  const int tapeW = 160, tapeH = 525;
+  const int tapeW = 220, tapeH = 525;
   const int cy = tapeH / 2;
   const float scale = 6.25;
 
@@ -442,38 +442,38 @@ void drawRollTape() {
     if (y < 0 || y >= tapeH) continue;
 
     bool major = (deg % 10 == 0);
-    int tickLen = major ? 32 : 15;
+    int tickLen = major ? 44 : 20;
     canvas->drawFastHLine(tapeW - tickLen, y, tickLen, COLOR_BORDER);
 
     if (major) {
-      canvas->setTextSize(2);
+      canvas->setTextSize(3);
       canvas->setTextColor(RGB565_WHITE);
-      canvas->setCursor(tapeW - tickLen - 46, y - 7);
+      canvas->setCursor(tapeW - tickLen - 60, y - 10);
       canvas->print(deg);
     }
   }
 
-  canvas->fillTriangle(tapeW + 1, cy, tapeW + 14, cy - 8, tapeW + 14, cy + 8, RGB565_WHITE);
+  canvas->fillTriangle(tapeW + 1, cy, tapeW + 18, cy - 11, tapeW + 18, cy + 11, RGB565_WHITE);
 
   int rollVal = (int)round(r);
-  canvas->fillRect(0, cy - 22, tapeW, 44, RGB565_BLACK);
-  canvas->drawRect(0, cy - 22, tapeW + 1, 44, RGB565_WHITE);
-  canvas->setTextSize(4);
+  canvas->fillRect(0, cy - 28, tapeW, 56, RGB565_BLACK);
+  canvas->drawRect(0, cy - 28, tapeW + 1, 56, RGB565_WHITE);
+  canvas->setTextSize(6);
   canvas->setTextColor(RGB565_GREEN);
   int digits = (abs(rollVal) >= 10) ? 2 : 1;
   if (rollVal < 0) digits++;
-  canvas->setCursor((tapeW - digits * 24) / 2, cy - 14);
+  canvas->setCursor((tapeW - digits * 36) / 2, cy - 24);
   canvas->print(rollVal);
 
-  canvas->setTextSize(1);
+  canvas->setTextSize(3);
   canvas->setTextColor(RGB565_WHITE);
-  canvas->setCursor(tapeW / 2 - 12, cy - 32);
+  canvas->setCursor(10, cy - 54);
   canvas->print("ROLL");
 }
 
 // ==================== DRAW: ALTITUDE TAPE (right) ====================
 void drawAltitudeTape() {
-  const int tapeW = 160, tapeH = 525;
+  const int tapeW = 220, tapeH = 525;
   const int tapeX = 1024 - tapeW;
   const int cy = tapeH / 2;
   const float scale = 2.5;
@@ -489,30 +489,30 @@ void drawAltitudeTape() {
     if (y < 0 || y >= tapeH) continue;
 
     bool major = (ft % 100 == 0);
-    int tickLen = major ? 32 : 15;
+    int tickLen = major ? 44 : 20;
     canvas->drawFastHLine(tapeX, y, tickLen, COLOR_BORDER);
 
-    if (major) {
-      canvas->setTextSize(2);
-      canvas->setTextColor(RGB565_WHITE);
-      canvas->setCursor(tapeX + tickLen + 4, y - 7);
-      canvas->print(ft);
-    }
+    canvas->setTextSize(3);
+    canvas->setTextColor(RGB565_WHITE);
+    canvas->setCursor(tapeX + tickLen + 6, y - 10);
+    canvas->print(ft);
   }
 
-  canvas->fillTriangle(tapeX - 2, cy, tapeX - 15, cy - 8, tapeX - 15, cy + 8, RGB565_WHITE);
+  canvas->fillTriangle(tapeX - 2, cy, tapeX - 20, cy - 11, tapeX - 20, cy + 11, RGB565_WHITE);
 
   int altVal = (int)round(altitude_ft);
-  canvas->fillRect(tapeX, cy - 22, tapeW, 44, RGB565_BLACK);
-  canvas->drawRect(tapeX - 1, cy - 22, tapeW + 1, 44, RGB565_WHITE);
-  canvas->setTextSize(4);
+  canvas->fillRect(tapeX, cy - 28, tapeW, 56, RGB565_BLACK);
+  canvas->drawRect(tapeX - 1, cy - 28, tapeW + 1, 56, RGB565_WHITE);
+  canvas->setTextSize(6);
   canvas->setTextColor(RGB565_GREEN);
-  canvas->setCursor(tapeX + 8, cy - 14);
+  int altDigits = (abs(altVal) >= 10000) ? 5 : (abs(altVal) >= 1000) ? 4 : (abs(altVal) >= 100) ? 3 : (abs(altVal) >= 10) ? 2 : 1;
+  if (altVal < 0) altDigits++;
+  canvas->setCursor(tapeX + (tapeW - altDigits * 36) / 2, cy - 24);
   canvas->print(altVal);
 
-  canvas->setTextSize(1);
+  canvas->setTextSize(3);
   canvas->setTextColor(RGB565_WHITE);
-  canvas->setCursor(tapeX + tapeW / 2 - 6, cy - 32);
+  canvas->setCursor(1024 - 64, cy - 54);
   canvas->print("ALT");
 }
 
