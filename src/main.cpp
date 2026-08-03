@@ -8,8 +8,6 @@
 #include <Adafruit_BMP280.h>
 #include <TinyGPSPlus.h>
 
-extern "C" void initVariant() {}
-
 // ==================== DISPLAY (Waveshare 7B RGB, 1024x600) ====================
 Arduino_ESP32RGBPanel *bus = new Arduino_ESP32RGBPanel(
   5, 3, 46, 7,
