@@ -31,7 +31,7 @@ Arduino_Canvas *canvas = new Arduino_Canvas(1024, 600, gfx, 0, 0);
 
 // ==================== HARDWARE ====================
 #define IMU_ADDR     0x68
-#define MAG_ADDR     0x0C
+#define MAG_ADDR     0x0E   // IST8310 compass
 #define GPS_I2C_ADDR 0x10
 #define TOUCH_INT    4
 
@@ -70,14 +70,6 @@ void imuWrite(uint8_t reg, uint8_t val) {
   Wire.endTransmission();
 }
 
-uint8_t imuRead1(uint8_t reg) {
-  Wire.beginTransmission(IMU_ADDR);
-  Wire.write(reg);
-  Wire.endTransmission(false);
-  Wire.requestFrom((uint8_t)IMU_ADDR, (uint8_t)1);
-  return Wire.read();
-}
-
 void selectMux() {
   if (!muxAddr) return;
   Wire.beginTransmission(muxAddr);
@@ -110,24 +102,30 @@ void initIMU() {
   imuWrite(0x1B, 0x00);
   imuWrite(0x1C, 0x00);
   imuWrite(0x1D, 0x03);
+}
 
-  uint8_t who = imuRead1(0x75);
+// IST8310 standalone compass (separate chip, not behind an MPU9250 bypass)
+void initMag() {
+  Wire.beginTransmission(MAG_ADDR);
+  Wire.write(0x00);  // WHO_AM_I
+  if (Wire.endTransmission(false) != 0) return;
+  if (Wire.requestFrom((uint8_t)MAG_ADDR, (uint8_t)1) != 1) return;
+  if (Wire.read() != 0x10) return;
 
-  if (who == 0x71 || who == 0x73) {
-    imuWrite(0x37, 0x02);
-    delay(10);
-    Wire.beginTransmission(MAG_ADDR);
-    if (Wire.endTransmission() == 0) {
-      Wire.beginTransmission(MAG_ADDR);
-      Wire.write(0x0B); Wire.write(0x01);
-      Wire.endTransmission();
-      delay(10);
-      Wire.beginTransmission(MAG_ADDR);
-      Wire.write(0x0A); Wire.write(0x16);
-      Wire.endTransmission();
-      magOk = true;
-    }
-  }
+  Wire.beginTransmission(MAG_ADDR);
+  Wire.write(0x0B); Wire.write(0x01);  // CNTRL2: soft reset
+  Wire.endTransmission();
+  delay(10);
+
+  Wire.beginTransmission(MAG_ADDR);
+  Wire.write(0x41); Wire.write(0x09);  // AVGCNTL: average 2 samples
+  Wire.endTransmission();
+
+  Wire.beginTransmission(MAG_ADDR);
+  Wire.write(0x42); Wire.write(0xC0);  // PDCNTL: required pulse duration setting
+  Wire.endTransmission();
+
+  magOk = true;
 }
 
 void calibrateGyro() {
@@ -207,19 +205,29 @@ void readMag() {
   if (!magOk) return;
 
   Wire.beginTransmission(MAG_ADDR);
-  Wire.write(0x02);
-  Wire.endTransmission(false);
-  if (Wire.requestFrom((uint8_t)MAG_ADDR, (uint8_t)1) != 1) return;
-  if (!(Wire.read() & 0x01)) return;
+  Wire.write(0x0A); Wire.write(0x01);  // CNTRL1: trigger single measurement
+  Wire.endTransmission();
+
+  bool ready = false;
+  for (int i = 0; i < 10; i++) {
+    delay(1);
+    Wire.beginTransmission(MAG_ADDR);
+    Wire.write(0x02);  // STAT1
+    Wire.endTransmission(false);
+    if (Wire.requestFrom((uint8_t)MAG_ADDR, (uint8_t)1) == 1 && (Wire.read() & 0x01)) {
+      ready = true;
+      break;
+    }
+  }
+  if (!ready) return;
 
   Wire.beginTransmission(MAG_ADDR);
-  Wire.write(0x03);
+  Wire.write(0x03);  // DATAXL
   Wire.endTransmission(false);
-  if (Wire.requestFrom((uint8_t)MAG_ADDR, (uint8_t)7) != 7) return;
+  if (Wire.requestFrom((uint8_t)MAG_ADDR, (uint8_t)6) != 6) return;
 
-  uint8_t mb[7];
-  for (int i = 0; i < 7; i++) mb[i] = Wire.read();
-  if (mb[6] & 0x08) return;
+  uint8_t mb[6];
+  for (int i = 0; i < 6; i++) mb[i] = Wire.read();
 
   float mx = (int16_t)(mb[1] << 8 | mb[0]) - magXOff;
   float my = (int16_t)(mb[3] << 8 | mb[2]) - magYOff;
@@ -781,11 +789,10 @@ void setup() {
   canvas->setTextColor(imuOk ? RGB565_GREEN : RGB565_RED);
   canvas->printf("IMU: %s", imuOk ? "OK" : "FAIL");
 
-  if (magOk) {
-    canvas->setCursor(10, 10 + row * 20); row++;
-    canvas->setTextColor(RGB565_GREEN);
-    canvas->print("MAG: OK (AK8963)");
-  }
+  initMag();
+  canvas->setCursor(10, 10 + row * 20); row++;
+  canvas->setTextColor(magOk ? RGB565_GREEN : RGB565_RED);
+  canvas->printf("MAG: %s (IST8310)", magOk ? "OK" : "FAIL");
 
   canvas->setCursor(10, 10 + row * 20); row++;
   canvas->setTextColor(RGB565_YELLOW);
