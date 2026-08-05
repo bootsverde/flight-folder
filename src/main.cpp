@@ -32,8 +32,12 @@ Arduino_Canvas *canvas = new Arduino_Canvas(1024, 600, gfx, 0, 0);
 // ==================== HARDWARE ====================
 #define IMU_ADDR     0x68
 #define MAG_ADDR     0x0E   // IST8310 compass
-#define GPS_I2C_ADDR 0x10
 #define TOUCH_INT    4
+
+// NEO-M8N GPS is UART-only (no I2C on this breakout). GPIO17 is already the
+// display's B3 data line, so UART2 can't use the Arduino default (16/17) TX pin.
+#define GPS_RX_PIN   16   // ESP32 RX <- GPS TX
+#define GPS_TX_PIN   15   // ESP32 TX -> GPS RX
 
 Adafruit_BMP280 bmp;
 TinyGPSPlus gps;
@@ -240,14 +244,16 @@ void readMag() {
 
   heading = atan2(-my2, mx2) * RAD_TO_DEG;
   if (heading < 0) heading += 360.0f;
+
+  // As mounted, N and S read backwards but E/W are correct -- that's a mirror
+  // about the E-W axis, not a uniform offset, so swap N/S only, leaving E/W be.
+  heading = fmod(540.0f - heading, 360.0f);
 }
 
 void readGPS() {
   if (!gpsOk) return;
-  if (Wire.requestFrom((uint8_t)GPS_I2C_ADDR, (uint8_t)32) == 0) return;
-  while (Wire.available()) {
-    char c = Wire.read();
-    if (c != 0x00 && c != 0xFF) gps.encode(c);
+  while (Serial2.available()) {
+    gps.encode(Serial2.read());
   }
   gpsFix = gps.location.isValid();
   if (gpsFix) {
@@ -358,7 +364,7 @@ void drawMenu() {
 
 // ==================== DRAW: HORIZON ====================
 void drawHorizon() {
-  const int W = 1024, H = 525;
+  const int W = 1024, H = 460;
   int cx = W / 2, cy = H / 2;
 
   float r = (roll - rollOffset) * DEG_TO_RAD;
@@ -430,7 +436,7 @@ void drawHorizon() {
 
 // ==================== DRAW: ROLL TAPE (left) ====================
 void drawRollTape() {
-  const int tapeW = 220, tapeH = 525;
+  const int tapeW = 220, tapeH = 460;
   const int cy = tapeH / 2;
   const float scale = 6.25;
 
@@ -447,7 +453,10 @@ void drawRollTape() {
     int tickLen = major ? 44 : 20;
     canvas->drawFastHLine(tapeW - tickLen, y, tickLen, COLOR_BORDER);
 
-    if (major) {
+    // Skip the label (not the tick) within ~14px of the tape edges so the glyph
+    // doesn't bleed past tapeH, where drawHeadingTape()'s fill paints over it
+    // and reads as a flashing/partially-hidden number.
+    if (major && y >= 14 && y <= tapeH - 14) {
       canvas->setTextSize(3);
       canvas->setTextColor(RGB565_WHITE);
       canvas->setCursor(tapeW - tickLen - 60, y - 10);
@@ -475,7 +484,7 @@ void drawRollTape() {
 
 // ==================== DRAW: ALTITUDE TAPE (right) ====================
 void drawAltitudeTape() {
-  const int tapeW = 220, tapeH = 525;
+  const int tapeW = 220, tapeH = 460;
   const int tapeX = 1024 - tapeW;
   const int cy = tapeH / 2;
   const float scale = 2.5;
@@ -494,10 +503,15 @@ void drawAltitudeTape() {
     int tickLen = major ? 44 : 20;
     canvas->drawFastHLine(tapeX, y, tickLen, COLOR_BORDER);
 
-    canvas->setTextSize(3);
-    canvas->setTextColor(RGB565_WHITE);
-    canvas->setCursor(tapeX + tickLen + 6, y - 10);
-    canvas->print(ft);
+    // Skip the label (not the tick) within ~14px of the tape edges so the glyph
+    // doesn't bleed past tapeH, where drawHeadingTape()'s fill paints over it
+    // and reads as a flashing/partially-hidden number.
+    if (y >= 14 && y <= tapeH - 14) {
+      canvas->setTextSize(3);
+      canvas->setTextColor(RGB565_WHITE);
+      canvas->setCursor(tapeX + tickLen + 6, y - 10);
+      canvas->print(ft);
+    }
   }
 
   canvas->fillTriangle(tapeX - 2, cy, tapeX - 20, cy - 11, tapeX - 20, cy + 11, RGB565_WHITE);
@@ -520,7 +534,7 @@ void drawAltitudeTape() {
 
 // ==================== DRAW: HEADING BAR (bottom) ====================
 void drawHeadingTape() {
-  const int barY = 525, barH = 75;
+  const int barY = 460, barH = 140;
   const int cx = 512;
   const float pxPerDeg = 5.0;
   static const char* compassNames[16] = {
@@ -543,23 +557,23 @@ void drawHeadingTape() {
       const char* label = compassNames[idx];
       int len = strlen(label);
 
-      canvas->drawFastVLine(x, barY + 2, 22, RGB565_WHITE);
-      canvas->setTextSize(2);
+      canvas->drawFastVLine(x, barY + 2, 30, RGB565_WHITE);
+      canvas->setTextSize(3);
       canvas->setTextColor((idx % 4 == 0) ? RGB565_GREEN : RGB565_WHITE);
-      canvas->setCursor(x - len * 6, barY + 28);
+      canvas->setCursor(x - len * 9, barY + 38);
       canvas->print(label);
     } else {
-      canvas->drawFastVLine(x, barY + 2, 12, COLOR_BORDER);
+      canvas->drawFastVLine(x, barY + 2, 16, COLOR_BORDER);
     }
   }
 
-  canvas->fillTriangle(cx, barY + 1, cx - 8, barY - 8, cx + 8, barY - 8, RGB565_WHITE);
+  canvas->fillTriangle(cx, barY + 1, cx - 10, barY - 10, cx + 10, barY - 10, RGB565_WHITE);
 
-  canvas->fillRect(cx - 30, barY + 46, 60, 26, RGB565_BLACK);
-  canvas->drawRect(cx - 30, barY + 46, 60, 26, RGB565_WHITE);
-  canvas->setTextSize(2);
+  canvas->fillRect(cx - 45, barY + 72, 90, 44, RGB565_BLACK);
+  canvas->drawRect(cx - 45, barY + 72, 90, 44, RGB565_WHITE);
+  canvas->setTextSize(4);
   canvas->setTextColor(RGB565_GREEN);
-  canvas->setCursor(cx - 18, barY + 50);
+  canvas->setCursor(cx - 32, barY + 80);
   canvas->printf("%03d", (int)heading % 360);
 }
 
@@ -579,14 +593,23 @@ void drawOverlay() {
   canvas->setCursor(53, 551);
   canvas->print("CAL");
 
-  canvas->setTextSize(1);
-  canvas->setTextColor(gpsFix ? RGB565_GREEN : COLOR_DIM);
-  canvas->setCursor(960, 531);
-  canvas->print(gpsFix ? "GPS" : "---");
+  // Heading-source / GPS status badges, top-right corner of the heading bar.
+  // Opaque boxes so they stay legible over whatever tick/label is underneath.
+  // (Earlier "clipped" report was just the "---" no-fix glyph being naturally
+  // short next to "MAG"'s full-height letters -- not an actual render bug.)
+  canvas->setTextSize(3);
 
-  canvas->setTextColor(magOk ? RGB565_GREEN : COLOR_DIM);
-  canvas->setCursor(909, 531);
+  canvas->fillRect(918, 464, 96, 34, RGB565_BLACK);
+  canvas->drawRect(918, 464, 96, 34, COLOR_BORDER);
+  canvas->setTextColor(magOk ? RGB565_GREEN : RGB565_RED);
+  canvas->setCursor(928, 470);
   canvas->print(magOk ? "MAG" : "GYR");
+
+  canvas->fillRect(814, 464, 96, 34, RGB565_BLACK);
+  canvas->drawRect(814, 464, 96, 34, COLOR_BORDER);
+  canvas->setTextColor(gpsFix ? RGB565_GREEN : RGB565_RED);
+  canvas->setCursor(824, 470);
+  canvas->print(gpsFix ? "GPS" : "---");
 }
 
 // ==================== DRAW: GPS SCREEN ====================
@@ -816,11 +839,14 @@ void setup() {
                     Adafruit_BMP280::STANDBY_MS_125);
   }
 
-  Wire.beginTransmission(GPS_I2C_ADDR);
-  gpsOk = (Wire.endTransmission() == 0);
+  Serial2.begin(9600, SERIAL_8N1, GPS_RX_PIN, GPS_TX_PIN);
+  unsigned long gpsWaitStart = millis();
+  while (millis() - gpsWaitStart < 2000 && !gpsOk) {
+    if (Serial2.available()) gpsOk = true;
+  }
   canvas->setCursor(10, 10 + row * 20); row++;
   canvas->setTextColor(gpsOk ? RGB565_GREEN : RGB565_RED);
-  canvas->printf("GPS: %s", gpsOk ? "OK" : "FAIL");
+  canvas->printf("GPS: %s (UART2)", gpsOk ? "OK" : "FAIL");
 
   canvas->setCursor(10, 10 + row * 20); row++;
   canvas->setTextColor(RGB565_WHITE);
