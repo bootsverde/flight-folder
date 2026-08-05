@@ -242,10 +242,12 @@ void readMag() {
   float mx2 = mx * cos(pr) + mz * sin(pr);
   float my2 = mx * sin(rr) * sin(pr) + my * cos(rr) - mz * sin(rr) * cos(pr);
 
-  // +180: as mounted, the IST8310 reads the opposite of true heading (pointing
-  // south reads as north) -- negating both atan2 args rotates the result 180 deg.
-  heading = atan2(my2, -mx2) * RAD_TO_DEG;
+  heading = atan2(-my2, mx2) * RAD_TO_DEG;
   if (heading < 0) heading += 360.0f;
+
+  // As mounted, N and S read backwards but E/W are correct -- that's a mirror
+  // about the E-W axis, not a uniform offset, so swap N/S only, leaving E/W be.
+  heading = fmod(540.0f - heading, 360.0f);
 }
 
 void readGPS() {
