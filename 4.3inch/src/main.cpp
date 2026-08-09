@@ -12,6 +12,9 @@
 // ==================== DISPLAY (Waveshare 4.3B RGB, 800x480) ====================
 // Same carrier board / RGB pinout as the 7B (verified against Waveshare's own
 // 4.3B example), only the timing constants, resolution and touch cal differ.
+// bounce_buffer_size_px (last arg): 10 scanlines' worth of internal-SRAM bounce
+// buffer -- the LCD peripheral DMA-reads from this instead of racing directly
+// against PSRAM writes, which is what caused the tearing/shift glitches.
 Arduino_ESP32RGBPanel *bus = new Arduino_ESP32RGBPanel(
   5, 3, 46, 7,
   1, 2, 42, 41, 40,
@@ -19,7 +22,8 @@ Arduino_ESP32RGBPanel *bus = new Arduino_ESP32RGBPanel(
   14, 38, 18, 17, 10,
   0, 40, 48, 88,
   0, 13, 3, 32,
-  1, 16000000
+  1, 16000000, false,
+  0, 0, 800 * 40
 );
 Arduino_RGB_Display *gfx = new Arduino_RGB_Display(800, 480, bus, 0, true);
 Arduino_Canvas *canvas = new Arduino_Canvas(800, 480, gfx, 0, 0);
@@ -30,6 +34,7 @@ Arduino_Canvas *canvas = new Arduino_Canvas(800, 480, gfx, 0, 0);
 #define COLOR_BORDER canvas->color565(80, 80, 80)
 #define COLOR_DIM    canvas->color565(120, 120, 120)
 #define COLOR_JEEP   canvas->color565(255, 140, 0)
+#define COLOR_AMBER  canvas->color565(255, 176, 32)
 
 // ==================== HARDWARE ====================
 #define IMU_ADDR     0x68
@@ -365,6 +370,44 @@ void drawMenu() {
   canvas->drawFastHLine(0, 60 + menuSize * 100, 800, canvas->color565(60, 60, 60));
 }
 
+// Arduino_GFX's drawBitmap() has no scale param -- it reads the PROGMEM array
+// at exactly JEEP_W/JEEP_H, so shrinking the icon means walking the source
+// bits ourselves and block-filling each destination row/run at the smaller
+// size, rather than regenerating the bitmap asset itself.
+const float JEEP_SCALE = 0.5f;
+
+void drawJeepScaled(int destCx, int destCy, float scale, uint16_t color) {
+  const int rowBytes = (JEEP_W + 7) / 8;
+  int dw = (int)(JEEP_W * scale + 0.5f);
+  int dh = (int)(JEEP_H * scale + 0.5f);
+  int ox = destCx - dw / 2;
+  int oy = destCy - dh / 2;
+
+  for (int sy = 0; sy < JEEP_H; sy++) {
+    int dy0 = oy + (int)(sy * scale);
+    int dy1 = oy + (int)((sy + 1) * scale);
+    if (dy1 <= dy0) dy1 = dy0 + 1;
+
+    int runStart = -1;
+    for (int sx = 0; sx <= JEEP_W; sx++) {
+      bool on = false;
+      if (sx < JEEP_W) {
+        uint8_t b = pgm_read_byte(&jeep_bitmap[sy * rowBytes + sx / 8]);
+        on = b & (0x80 >> (sx % 8));
+      }
+      if (on && runStart < 0) {
+        runStart = sx;
+      } else if (!on && runStart >= 0) {
+        int dx0 = ox + (int)(runStart * scale);
+        int dx1 = ox + (int)(sx * scale);
+        if (dx1 <= dx0) dx1 = dx0 + 1;
+        canvas->fillRect(dx0, dy0, dx1 - dx0, dy1 - dy0, color);
+        runStart = -1;
+      }
+    }
+  }
+}
+
 // ==================== DRAW: HORIZON ====================
 void drawHorizon() {
   const int W = 800, H = 368;
@@ -434,7 +477,7 @@ void drawHorizon() {
     }
   }
 
-  canvas->drawBitmap(cx - JEEP_W / 2, cy - JEEP_H / 2, jeep_bitmap, JEEP_W, JEEP_H, COLOR_JEEP);
+  drawJeepScaled(cx, cy, JEEP_SCALE, COLOR_JEEP);
 }
 
 // ==================== DRAW: ROLL TAPE (left) ====================
@@ -454,7 +497,7 @@ void drawRollTape() {
 
     bool major = (deg % 10 == 0);
     int tickLen = major ? 34 : 16;
-    canvas->drawFastHLine(tapeW - tickLen, y, tickLen, COLOR_BORDER);
+    canvas->drawFastHLine(tapeW - tickLen, y, tickLen, RGB565_WHITE);
 
     // Skip the label (not the tick) within ~14px of the tape edges so the glyph
     // doesn't bleed past tapeH, where drawHeadingTape()'s fill paints over it
@@ -472,11 +515,11 @@ void drawRollTape() {
   int rollVal = (int)round(r);
   canvas->fillRect(0, cy - 22, tapeW, 45, RGB565_BLACK);
   canvas->drawRect(0, cy - 22, tapeW + 1, 45, RGB565_WHITE);
-  canvas->setTextSize(6);
+  canvas->setTextSize(5);
   canvas->setTextColor(RGB565_GREEN);
   int digits = (abs(rollVal) >= 10) ? 2 : 1;
   if (rollVal < 0) digits++;
-  canvas->setCursor((tapeW - digits * 36) / 2, cy - 19);
+  canvas->setCursor((tapeW - digits * 30) / 2, cy - 19);
   canvas->print(rollVal);
 
   canvas->setTextSize(3);
@@ -504,7 +547,7 @@ void drawAltitudeTape() {
 
     bool major = (ft % 100 == 0);
     int tickLen = major ? 34 : 16;
-    canvas->drawFastHLine(tapeX, y, tickLen, COLOR_BORDER);
+    canvas->drawFastHLine(tapeX, y, tickLen, RGB565_WHITE);
 
     // Skip the label (not the tick) within ~14px of the tape edges so the glyph
     // doesn't bleed past tapeH, where drawHeadingTape()'s fill paints over it
@@ -517,29 +560,57 @@ void drawAltitudeTape() {
     }
   }
 
+  // Amber trend vector: how fast/which way altitude is currently changing,
+  // not just where it is -- same rate-of-change cue Boeing tapes use.
+  static float prevAltFt = altitude_ft;
+  static unsigned long prevAltMs = 0;
+  unsigned long nowMs = millis();
+  float dtSec = (prevAltMs == 0) ? 0.05f : (nowMs - prevAltMs) / 1000.0f;
+  if (dtSec <= 0) dtSec = 0.05f;
+  static float altTrendSmooth = 0;
+  altTrendSmooth = 0.8f * altTrendSmooth + 0.2f * ((altitude_ft - prevAltFt) / dtSec);
+  prevAltFt = altitude_ft;
+  prevAltMs = nowMs;
+
+  float trendPx = altTrendSmooth * scale * 3.0f;
+  if (trendPx > 140) trendPx = 140;
+  if (trendPx < -140) trendPx = -140;
+  if (fabs(trendPx) > 3) {
+    int tx = 796;
+    int ty1 = cy - (int)trendPx;
+    canvas->drawFastVLine(tx, min(cy, ty1), abs(ty1 - cy) + 1, COLOR_AMBER);
+    canvas->drawFastVLine(tx - 1, min(cy, ty1), abs(ty1 - cy) + 1, COLOR_AMBER);
+    int dir = trendPx < 0 ? -1 : 1;
+    canvas->fillTriangle(tx, ty1, tx - 6, ty1 - dir * 9, tx + 3, ty1 - dir * 9, COLOR_AMBER);
+  }
+
   canvas->fillTriangle(tapeX - 2, cy, tapeX - 16, cy - 9, tapeX - 16, cy + 9, RGB565_WHITE);
 
   int altVal = (int)round(altitude_ft);
   canvas->fillRect(tapeX, cy - 22, tapeW, 45, RGB565_BLACK);
   canvas->drawRect(tapeX - 1, cy - 22, tapeW + 1, 45, RGB565_WHITE);
-  canvas->setTextSize(6);
+  canvas->setTextSize(5);
   canvas->setTextColor(RGB565_GREEN);
   int altDigits = (abs(altVal) >= 10000) ? 5 : (abs(altVal) >= 1000) ? 4 : (abs(altVal) >= 100) ? 3 : (abs(altVal) >= 10) ? 2 : 1;
   if (altVal < 0) altDigits++;
-  canvas->setCursor(tapeX + (tapeW - altDigits * 36) / 2, cy - 19);
+  canvas->setCursor(tapeX + (tapeW - altDigits * 30) / 2, cy - 19);
   canvas->print(altVal);
 
   canvas->setTextSize(3);
   canvas->setTextColor(RGB565_WHITE);
-  canvas->setCursor(800 - 50, cy - 43);
+  canvas->setCursor(800 - 64, cy - 43);
   canvas->print("ALT");
 }
 
-// ==================== DRAW: HEADING BAR (bottom) ====================
+// ==================== DRAW: HEADING ARC (bottom) ====================
+// Boeing/Airbus-style shallow compass arc instead of a flat tape -- ticks sag
+// away from center along a gentle parabola rather than running in a straight line.
 void drawHeadingTape() {
   const int barY = 368, barH = 112;
   const int cx = 400;
   const float pxPerDeg = 3.9;
+  const int topY = barY + 16;
+  const int maxSag = 18;
   static const char* compassNames[16] = {
     "N", "NNE", "NE", "ENE", "E", "ESE", "SE", "SSE",
     "S", "SSW", "SW", "WSW", "W", "WNW", "NW", "NNW"
@@ -554,39 +625,58 @@ void drawHeadingTape() {
     int x = cx + (int)(angleOffset * pxPerDeg);
     if (x < 0 || x >= 800) continue;
 
+    float t = (x - cx) / 400.0f;
+    int ty = topY + (int)(maxSag * t * t);
+
     if (n % 3 == 0) {
       float degF = fmod(heading + angleOffset + 360.0f, 360.0f);
       int idx = ((int)round(degF / 22.5f)) % 16;
       const char* label = compassNames[idx];
       int len = strlen(label);
 
-      canvas->drawFastVLine(x, barY + 2, 24, RGB565_WHITE);
+      canvas->drawFastVLine(x, ty, 24, RGB565_WHITE);
       canvas->setTextSize(3);
-      canvas->setTextColor((idx % 4 == 0) ? RGB565_GREEN : RGB565_WHITE);
-      canvas->setCursor(x - len * 9, barY + 30);
+      canvas->setTextColor(RGB565_WHITE);
+      canvas->setCursor(x - len * 9, ty + 28);
       canvas->print(label);
     } else {
-      canvas->drawFastVLine(x, barY + 2, 13, COLOR_BORDER);
+      canvas->drawFastVLine(x, ty, 13, RGB565_WHITE);
     }
   }
 
-  canvas->fillTriangle(cx, barY + 1, cx - 8, barY - 8, cx + 8, barY - 8, RGB565_WHITE);
+  canvas->fillTriangle(cx, topY - 2, cx - 8, topY - 14, cx + 8, topY - 14, RGB565_WHITE);
 
-  canvas->fillRect(cx - 35, barY + 58, 70, 35, RGB565_BLACK);
-  canvas->drawRect(cx - 35, barY + 58, 70, 35, RGB565_WHITE);
+  canvas->fillRect(cx - 40, barY + 58, 80, 35, RGB565_BLACK);
+  canvas->drawRect(cx - 40, barY + 58, 80, 35, RGB565_WHITE);
   canvas->setTextSize(4);
   canvas->setTextColor(RGB565_GREEN);
-  canvas->setCursor(cx - 25, barY + 64);
+  canvas->setCursor(cx - 36, barY + 64);
   canvas->printf("%03d", (int)heading % 360);
+}
+
+// Boeing/Airbus "unusual attitude" cue: black/amber hazard chevrons along the
+// top of the sphere, in place of a plain text warning.
+void drawAttitudeChevrons() {
+  const int bandH = 20;
+  const int x0 = 172, x1 = 800 - 172;
+  const int thick = 10;
+
+  canvas->fillRect(x0, 0, x1 - x0, bandH, RGB565_BLACK);
+  for (int sx = x0 - bandH; sx < x1 + bandH; sx += 24) {
+    canvas->fillTriangle(sx, bandH, sx + bandH, 0, sx + bandH + thick, 0, COLOR_AMBER);
+    canvas->fillTriangle(sx, bandH, sx + bandH + thick, 0, sx + thick, bandH, COLOR_AMBER);
+  }
+
+  canvas->setTextSize(2);
+  canvas->setTextColor(COLOR_AMBER);
+  canvas->setCursor(400 - 58, bandH + 4);
+  canvas->print("ATTITUDE");
 }
 
 // ==================== DRAW: OVERLAY ====================
 void drawOverlay() {
   if (abs(roll - rollOffset) > 35 || abs(pitch - pitchOffset) > 35) {
-    canvas->setTextColor(RGB565_RED);
-    canvas->setTextSize(4);
-    canvas->setCursor(250, 8);
-    canvas->print("! DANGER !");
+    drawAttitudeChevrons();
   }
 
   canvas->fillRoundRect(30, 430, 90, 50, 6, canvas->color565(40, 40, 40));
