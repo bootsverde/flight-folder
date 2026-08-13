@@ -38,7 +38,7 @@ Arduino_Canvas *canvas = new Arduino_Canvas(800, 480, gfx, 0, 0);
 
 // ==================== HARDWARE ====================
 #define IMU_ADDR     0x68
-#define MAG_ADDR     0x0E   // IST8310 compass
+#define MAG_ADDR     0x0C   // AK8963, built into the MPU-9250/9255, reached via I2C bypass
 #define TOUCH_INT    4
 
 // NEO-M8N GPS is UART-only (no I2C on this breakout). GPIO17 is already the
@@ -113,28 +113,71 @@ void initIMU() {
   imuWrite(0x1B, 0x00);
   imuWrite(0x1C, 0x00);
   imuWrite(0x1D, 0x03);
+
+  // Bypass the MPU-9250's I2C master so its built-in AK8963 magnetometer
+  // is directly addressable on the main bus at 0x0C, instead of only being
+  // reachable through the IMU's internal auxiliary I2C bus.
+  imuWrite(0x6A, 0x00);   // USER_CTRL: disable I2C master mode
+  imuWrite(0x37, 0x02);   // INT_PIN_CFG: BYPASS_EN
+  delay(10);
+
+  Wire.beginTransmission(IMU_ADDR);
+  Wire.write(0x75);  // WHO_AM_I
+  Wire.endTransmission(false);
+  Wire.requestFrom((uint8_t)IMU_ADDR, (uint8_t)1);
+  uint8_t whoami = Wire.read();
+  Serial.printf("IMU WHO_AM_I=0x%02X (9250=0x71, 9255=0x73, 6500=0x70 -- 6500 has no AK8963)\n", whoami);
 }
 
-// IST8310 standalone compass (separate chip, not behind an MPU9250 bypass)
+// AK8963 magnetometer built into the MPU-9250/9255 (the GY-91's own compass),
+// reached through the I2C bypass initIMU() enables -- not a separate chip.
+float magAsaX = 1, magAsaY = 1, magAsaZ = 1;  // factory sensitivity adjustment, from Fuse ROM
+
 void initMag() {
   Wire.beginTransmission(MAG_ADDR);
-  Wire.write(0x00);  // WHO_AM_I
-  if (Wire.endTransmission(false) != 0) return;
-  if (Wire.requestFrom((uint8_t)MAG_ADDR, (uint8_t)1) != 1) return;
-  if (Wire.read() != 0x10) return;
+  Wire.write(0x00);  // WIA (who I am)
+  uint8_t ackErr = Wire.endTransmission(false);
+  if (ackErr != 0) {
+    Serial.printf("AK8963 probe: no ACK at 0x%02X (I2C error %d)\n", MAG_ADDR, ackErr);
+    return;
+  }
+  if (Wire.requestFrom((uint8_t)MAG_ADDR, (uint8_t)1) != 1) {
+    Serial.println("AK8963 probe: WIA read failed");
+    return;
+  }
+  uint8_t wia = Wire.read();
+  Serial.printf("AK8963 WIA=0x%02X (expect 0x48)\n", wia);
+  if (wia != 0x48) return;
 
   Wire.beginTransmission(MAG_ADDR);
-  Wire.write(0x0B); Wire.write(0x01);  // CNTRL2: soft reset
+  Wire.write(0x0A); Wire.write(0x00);  // CNTL1: power-down (required before mode change)
   Wire.endTransmission();
   delay(10);
 
   Wire.beginTransmission(MAG_ADDR);
-  Wire.write(0x41); Wire.write(0x09);  // AVGCNTL: average 2 samples
+  Wire.write(0x0A); Wire.write(0x0F);  // CNTL1: fuse ROM access mode
   Wire.endTransmission();
+  delay(10);
 
   Wire.beginTransmission(MAG_ADDR);
-  Wire.write(0x42); Wire.write(0xC0);  // PDCNTL: required pulse duration setting
+  Wire.write(0x10);  // ASAX (sensitivity adjustment values start here)
+  Wire.endTransmission(false);
+  if (Wire.requestFrom((uint8_t)MAG_ADDR, (uint8_t)3) == 3) {
+    uint8_t asax = Wire.read(), asay = Wire.read(), asaz = Wire.read();
+    magAsaX = ((asax - 128) * 0.5f / 128.0f) + 1.0f;
+    magAsaY = ((asay - 128) * 0.5f / 128.0f) + 1.0f;
+    magAsaZ = ((asaz - 128) * 0.5f / 128.0f) + 1.0f;
+  }
+
+  Wire.beginTransmission(MAG_ADDR);
+  Wire.write(0x0A); Wire.write(0x00);  // CNTL1: power-down again before switching modes
   Wire.endTransmission();
+  delay(10);
+
+  Wire.beginTransmission(MAG_ADDR);
+  Wire.write(0x0A); Wire.write(0x16);  // CNTL1: 16-bit output, continuous mode 2 (100 Hz)
+  Wire.endTransmission();
+  delay(10);
 
   magOk = true;
 }
@@ -194,8 +237,14 @@ void readIMU() {
   float fax = ax / 16384.0f;
   float fay = ay / 16384.0f;
   float faz = az / 16384.0f;
-  float accelPitch = atan2(faz, fay) * RAD_TO_DEG;
-  float accelRoll  = atan2(-fax, fay) * RAD_TO_DEG;
+  float accelPitch = atan2(faz, fay) * RAD_TO_DEG + 130.5f;   // this GY-91's mount reads -130.5 deg at true level
+  float accelRoll  = atan2(-fax, fay) * RAD_TO_DEG - 93.0f;   // this GY-91's mount is rotated 93 deg CCW from the reference orientation
+  accelPitch = fmod(accelPitch + 180.0f, 360.0f);
+  if (accelPitch < 0) accelPitch += 360.0f;
+  accelPitch -= 180.0f;
+  accelRoll = fmod(accelRoll + 180.0f, 360.0f);
+  if (accelRoll < 0) accelRoll += 360.0f;
+  accelRoll -= 180.0f;
 
   float gxRate = gx / 131.0f - gxBias;
   float gyRate = gy / 131.0f - gyBias;
@@ -215,34 +264,28 @@ void readIMU() {
 void readMag() {
   if (!magOk) return;
 
+  // AK8963 free-runs in continuous mode (set in initMag()) -- just check DRDY.
   Wire.beginTransmission(MAG_ADDR);
-  Wire.write(0x0A); Wire.write(0x01);  // CNTRL1: trigger single measurement
-  Wire.endTransmission();
-
-  bool ready = false;
-  for (int i = 0; i < 10; i++) {
-    delay(1);
-    Wire.beginTransmission(MAG_ADDR);
-    Wire.write(0x02);  // STAT1
-    Wire.endTransmission(false);
-    if (Wire.requestFrom((uint8_t)MAG_ADDR, (uint8_t)1) == 1 && (Wire.read() & 0x01)) {
-      ready = true;
-      break;
-    }
-  }
-  if (!ready) return;
-
-  Wire.beginTransmission(MAG_ADDR);
-  Wire.write(0x03);  // DATAXL
+  Wire.write(0x02);  // ST1
   Wire.endTransmission(false);
-  if (Wire.requestFrom((uint8_t)MAG_ADDR, (uint8_t)6) != 6) return;
+  if (Wire.requestFrom((uint8_t)MAG_ADDR, (uint8_t)1) != 1) return;
+  if (!(Wire.read() & 0x01)) return;  // data not ready yet
 
-  uint8_t mb[6];
-  for (int i = 0; i < 6; i++) mb[i] = Wire.read();
+  Wire.beginTransmission(MAG_ADDR);
+  Wire.write(0x03);  // HXL
+  Wire.endTransmission(false);
+  // Read through ST2 (0x09) in the same transaction -- AK8963 requires ST2 to
+  // be read to latch the sample and confirm no overflow; skipping it leaves
+  // DRDY stuck and the next read stale.
+  if (Wire.requestFrom((uint8_t)MAG_ADDR, (uint8_t)7) != 7) return;
 
-  float mx = (int16_t)(mb[1] << 8 | mb[0]) - magXOff;
-  float my = (int16_t)(mb[3] << 8 | mb[2]) - magYOff;
-  float mz = (int16_t)(mb[5] << 8 | mb[4]) - magZOff;
+  uint8_t mb[7];
+  for (int i = 0; i < 7; i++) mb[i] = Wire.read();
+  if (mb[6] & 0x08) return;  // ST2 HOFL bit: magnetic sensor overflow, discard
+
+  float mx = (int16_t)(mb[1] << 8 | mb[0]) * magAsaX - magXOff;
+  float my = (int16_t)(mb[3] << 8 | mb[2]) * magAsaY - magYOff;
+  float mz = (int16_t)(mb[5] << 8 | mb[4]) * magAsaZ - magZOff;
 
   float pr = (pitch - pitchOffset) * DEG_TO_RAD;
   float rr = (roll  - rollOffset)  * DEG_TO_RAD;
@@ -252,8 +295,10 @@ void readMag() {
   heading = atan2(-my2, mx2) * RAD_TO_DEG;
   if (heading < 0) heading += 360.0f;
 
-  // As mounted, N and S read backwards but E/W are correct -- that's a mirror
-  // about the E-W axis, not a uniform offset, so swap N/S only, leaving E/W be.
+  // This N/S swap was tuned for the IST8310's mounting orientation. The AK8963
+  // (inside the MPU-9250) may not need the same correction, or may need a
+  // different one -- verify heading against a known reference (phone compass)
+  // and adjust or remove this line once real readings are in hand.
   heading = fmod(540.0f - heading, 360.0f);
 }
 
@@ -908,7 +953,7 @@ void setup() {
   initMag();
   canvas->setCursor(8, 8 + row * 16); row++;
   canvas->setTextColor(magOk ? RGB565_GREEN : RGB565_RED);
-  canvas->printf("MAG: %s (IST8310)", magOk ? "OK" : "FAIL");
+  canvas->printf("MAG: %s (AK8963)", magOk ? "OK" : "FAIL");
 
   canvas->setCursor(8, 8 + row * 16); row++;
   canvas->setTextColor(RGB565_YELLOW);
@@ -920,7 +965,9 @@ void setup() {
   canvas->print("GYRO: OK");
 
   bmpOk = bmp.begin(0x77);
-  if (!bmpOk) bmpOk = bmp.begin(0x76);
+  uint8_t bmpAddr = bmpOk ? 0x77 : 0;
+  if (!bmpOk) { bmpOk = bmp.begin(0x76); if (bmpOk) bmpAddr = 0x76; }
+  Serial.printf("BARO begin: %s at 0x%02X\n", bmpOk ? "OK" : "FAIL", bmpAddr);
   canvas->setCursor(8, 8 + row * 16); row++;
   canvas->setTextColor(bmpOk ? RGB565_GREEN : RGB565_RED);
   canvas->printf("BARO: %s", bmpOk ? "OK" : "FAIL");
@@ -930,6 +977,11 @@ void setup() {
                     Adafruit_BMP280::SAMPLING_X4,
                     Adafruit_BMP280::FILTER_X4,
                     Adafruit_BMP280::STANDBY_MS_125);
+    delay(50);
+    Serial.printf("BARO first read: temp=%.2fC pressure=%.2fhPa altitude=%.1fm (%.0fft)\n",
+                  bmp.readTemperature(), bmp.readPressure() / 100.0f,
+                  bmp.readAltitude(seaLevelPressure_hPa),
+                  bmp.readAltitude(seaLevelPressure_hPa) * 3.28084f);
   }
 
   Serial2.begin(9600, SERIAL_8N1, GPS_RX_PIN, GPS_TX_PIN);
@@ -963,6 +1015,12 @@ void loop() {
   readMag();
   readGPS();
   readBaro();
+
+  static unsigned long lastAttPrint = 0;
+  if (millis() - lastAttPrint > 500) {
+    lastAttPrint = millis();
+    Serial.printf("pitch=%.1f roll=%.1f\n", pitch, roll);
+  }
 
   if (menuActive) {
     drawMenu();
