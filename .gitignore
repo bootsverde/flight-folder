@@ -4,3 +4,7 @@
 .vscode/launch.json
 .vscode/ipch
 __pycache__/
+
+# Full-flash known-good backups -- large binaries, meant to be pruned
+# locally per their own README, not accumulated in git history.
+backups/

@@ -7,6 +7,8 @@
 #include <TAMC_GT911.h>
 #include <Adafruit_BMP280.h>
 #include <TinyGPSPlus.h>
+#include <Preferences.h>
+#include <esp_task_wdt.h>
 #include "jeep_bitmap.h"
 
 // ==================== DISPLAY (Waveshare 4.3B RGB, 800x480) ====================
@@ -40,6 +42,8 @@ Arduino_Canvas *canvas = new Arduino_Canvas(800, 480, gfx, 0, 0);
 #define IMU_ADDR     0x68
 #define MAG_ADDR     0x0C   // AK8963, built into the MPU-9250/9255, reached via I2C bypass
 #define TOUCH_INT    4
+#define I2C_SDA_PIN  8
+#define I2C_SCL_PIN  9
 
 // NEO-M8N GPS is UART-only (no I2C on this breakout). GPIO17 is already the
 // display's B3 data line, so UART2 can't use the Arduino default (16/17) TX pin.
@@ -53,6 +57,12 @@ TAMC_GT911 ts = TAMC_GT911(8, 9, TOUCH_INT, -1, 800, 480);
 uint8_t muxAddr = 0;
 bool imuOk = false, magOk = false, bmpOk = false, gpsOk = false;
 
+// Consecutive failed IMU reads -- used as the canary for a wedged I2C bus
+// (automotive electrical noise can leave a slave holding SDA low mid-
+// transaction). The IMU is read every loop, making it the fastest signal.
+uint16_t imuFailStreak = 0;
+const uint16_t I2C_FAIL_THRESHOLD = 40;  // ~2s of consecutive misses at the ~50ms loop period
+
 // ==================== STATE ====================
 float pitch = 0, roll = 0, heading = 0;
 float altitude_m = 0, speed_mph = 0;
@@ -64,6 +74,29 @@ float pitchOffset = 0, rollOffset = 0;
 float gxBias = 0, gyBias = 0, gzBias = 0;
 float magXOff = 0, magYOff = 0, magZOff = 0;
 float seaLevelPressure_hPa = 1013.25;
+
+// Persisted to NVS so QNH / level-horizon calibration survives power cycles
+// instead of resetting to defaults every time this gets power-cycled in the
+// Jeep. Writes are debounced -- only flushed CAL_SAVE_DEBOUNCE_MS after the
+// value stops changing, so mashing the QNH +/- buttons doesn't hammer flash.
+Preferences prefs;
+bool calDirty = false;
+unsigned long calDirtyTime = 0;
+const unsigned long CAL_SAVE_DEBOUNCE_MS = 1000;
+
+void markCalDirty() {
+  calDirty = true;
+  calDirtyTime = millis();
+}
+
+void saveCalIfDirty() {
+  if (!calDirty || millis() - calDirtyTime < CAL_SAVE_DEBOUNCE_MS) return;
+  prefs.putFloat("pitchOff", pitchOffset);
+  prefs.putFloat("rollOff", rollOffset);
+  prefs.putFloat("qnh", seaLevelPressure_hPa);
+  calDirty = false;
+  Serial.println("Calibration saved to NVS");
+}
 
 // ==================== UI ====================
 int  currentScreen = 0;
@@ -99,6 +132,47 @@ void enableDisplay() {
   delay(200);
 }
 
+// Classic I2C bus-recovery: if a slave got left holding SDA low mid-
+// transaction (an automotive electrical glitch is a plausible cause here),
+// the bus is wedged and every future transaction will silently fail. Drop
+// down to bit-banging the pins, clock SCL until the slave releases SDA, then
+// manufacture a STOP condition and hand the bus back to the Wire driver.
+// This only clears the electrical wedge -- sensor register config (mag
+// continuous mode, baro sampling, etc.) survives and doesn't need re-init.
+void recoverI2CBus() {
+  Wire.end();
+  pinMode(I2C_SDA_PIN, INPUT_PULLUP);
+  pinMode(I2C_SCL_PIN, OUTPUT);
+  digitalWrite(I2C_SCL_PIN, HIGH);
+  delayMicroseconds(5);
+
+  if (digitalRead(I2C_SDA_PIN) == HIGH) {
+    Wire.begin(I2C_SDA_PIN, I2C_SCL_PIN);
+    return;  // bus wasn't actually stuck -- the failures had some other cause
+  }
+
+  Serial.println("I2C bus recovery: SDA stuck low, pulsing SCL...");
+  for (int i = 0; i < 9 && digitalRead(I2C_SDA_PIN) == LOW; i++) {
+    digitalWrite(I2C_SCL_PIN, LOW);
+    delayMicroseconds(5);
+    digitalWrite(I2C_SCL_PIN, HIGH);
+    delayMicroseconds(5);
+  }
+
+  // STOP condition: SDA rising while SCL is held high.
+  pinMode(I2C_SDA_PIN, OUTPUT);
+  digitalWrite(I2C_SDA_PIN, LOW);
+  delayMicroseconds(5);
+  digitalWrite(I2C_SCL_PIN, HIGH);
+  delayMicroseconds(5);
+  digitalWrite(I2C_SDA_PIN, HIGH);
+  delayMicroseconds(5);
+
+  Wire.begin(I2C_SDA_PIN, I2C_SCL_PIN);
+  Serial.printf("I2C bus recovery done, SDA now %s\n",
+                digitalRead(I2C_SDA_PIN) == HIGH ? "released" : "STILL STUCK");
+}
+
 // ==================== SENSOR INIT ====================
 void initIMU() {
   Wire.beginTransmission(IMU_ADDR);
@@ -109,10 +183,19 @@ void initIMU() {
 
   imuWrite(0x6B, 0x01);
   delay(10);
-  imuWrite(0x1A, 0x03);
+  // CONFIG (gyro/temp DLPF) and ACCEL_CONFIG2 (accel DLPF): was DLPF_CFG=3
+  // (~41Hz gyro / ~45Hz accel bandwidth), which let a lot of Jeep engine and
+  // road vibration straight through -- felt "jerky"/twitchy on a test drive
+  // even on smooth pavement. Tightened to DLPF_CFG=5 (~10Hz both), which
+  // rejects most vibration content while still responding to real attitude
+  // changes (which happen over seconds, not tens of Hz). Costs a bit of
+  // added filter delay (~18ms gyro / ~36ms accel) -- negligible next to the
+  // ~50-65ms display loop period. Bump to 6 (~5Hz) if still twitchy, or back
+  // toward 4/3 if it starts feeling laggy on quick maneuvers.
+  imuWrite(0x1A, 0x05);
   imuWrite(0x1B, 0x00);
   imuWrite(0x1C, 0x00);
-  imuWrite(0x1D, 0x03);
+  imuWrite(0x1D, 0x05);
 
   // Bypass the MPU-9250's I2C master so its built-in AK8963 magnetometer
   // is directly addressable on the main bus at 0x0C, instead of only being
@@ -214,7 +297,7 @@ void readIMU() {
   Wire.beginTransmission(IMU_ADDR);
   Wire.write(0x3B);
   Wire.endTransmission(false);
-  if (Wire.requestFrom((uint8_t)IMU_ADDR, (uint8_t)14) != 14) return;
+  if (Wire.requestFrom((uint8_t)IMU_ADDR, (uint8_t)14) != 14) { imuFailStreak++; return; }
 
   uint8_t buf[14];
   for (int i = 0; i < 14; i++) buf[i] = Wire.read();
@@ -226,7 +309,8 @@ void readIMU() {
   int16_t gy = (buf[10] << 8) | buf[11];
   int16_t gz = (buf[12] << 8) | buf[13];
 
-  if (ax == 0 && ay == 0 && az == 0) return;
+  if (ax == 0 && ay == 0 && az == 0) { imuFailStreak++; return; }
+  imuFailStreak = 0;
 
   unsigned long now = millis();
   float dt = (now - prevTime) / 1000.0f;
@@ -246,12 +330,18 @@ void readIMU() {
   if (accelRoll < 0) accelRoll += 360.0f;
   accelRoll -= 180.0f;
 
+  // Pitch axis reads backwards on this mount (nose-up shows as nose-down) --
+  // flip both the accel and gyro contributions together so the complementary
+  // filter's two inputs stay in agreement instead of fighting each other.
+  // Negating post-normalization is safe: 0 (level) stays 0 either way.
+  accelPitch = -accelPitch;
+
   float gxRate = gx / 131.0f - gxBias;
   float gyRate = gy / 131.0f - gyBias;
   float gzRate = gz / 131.0f - gzBias;
 
-  // vertical mount: gx=pitch, gz=roll(inverted), gy=yaw
-  pitch = 0.96f * (pitch + gxRate * dt) + 0.04f * accelPitch;
+  // vertical mount: gx=pitch (inverted, see above), gz=roll(inverted), gy=yaw
+  pitch = 0.96f * (pitch - gxRate * dt) + 0.04f * accelPitch;
   roll  = 0.96f * (roll  - gzRate * dt) + 0.04f * accelRoll;
 
   if (!magOk) {
@@ -319,6 +409,20 @@ void readBaro() {
   altitude_m = bmp.readAltitude(seaLevelPressure_hPa);
 }
 
+// Home field's known elevation -- lets the Calibrate screen back-solve the
+// exact QNH from today's raw pressure in one tap, instead of nudging QNH
+// +-1 hPa by hand and eyeballing the altitude readout.
+const float HOME_FIELD_ALT_FT = 52.0f;
+const float HOME_FIELD_ALT_M  = HOME_FIELD_ALT_FT / 3.28084f;
+
+void syncQnhToKnownAltitude() {
+  if (!bmpOk) return;
+  float pressure_hPa = bmp.readPressure() / 100.0f;
+  seaLevelPressure_hPa = pressure_hPa / pow(1.0f - HOME_FIELD_ALT_M / 44330.0f, 1.0f / 0.1903f);
+  Serial.printf("QNH synced to known field alt (%.0fft): pressure=%.1fhPa -> QNH=%.1fhPa\n",
+                HOME_FIELD_ALT_FT, pressure_hPa, seaLevelPressure_hPa);
+}
+
 // ==================== TOUCH ====================
 void readTouch() {
   touchTap = false;
@@ -371,15 +475,24 @@ void processTouch() {
     if (tapY >= 80 && tapY < 180) {
       if (tapX < 400) seaLevelPressure_hPa -= 1.0f;
       else            seaLevelPressure_hPa += 1.0f;
+      markCalDirty();
       return;
     }
     if (tapY >= 180 && tapY < 300) {
       pitchOffset = pitch;
       rollOffset = roll;
+      markCalDirty();
       return;
     }
     if (tapY >= 300 && tapY < 415) {
       heading = 0;
+      return;
+    }
+    // Bottom strip right of the MENU button (which already claims x<180 via
+    // the currentScreen!=0 && tapX<180 && tapY>415 check above this block).
+    if (tapY > 415) {
+      syncQnhToKnownAltitude();
+      markCalDirty();
       return;
     }
   }
@@ -872,6 +985,15 @@ void drawCalibrateScreen() {
 
   canvas->drawFastHLine(0, 415, 800, canvas->color565(60, 60, 60));
 
+  // Bottom strip, right of the MENU button: one-tap QNH sync against the
+  // known home-field elevation, instead of nudging QNH +-1 hPa by hand.
+  canvas->fillRoundRect(180, 415, 620, 65, 10, canvas->color565(15, 40, 15));
+  canvas->drawRoundRect(180, 415, 620, 65, 10, RGB565_GREEN);
+  canvas->setTextSize(3);
+  canvas->setTextColor(RGB565_WHITE);
+  canvas->setCursor(200, 432);
+  canvas->printf("SYNC ALT -> %.0f ft", HOME_FIELD_ALT_FT);
+
   drawMenuButton();
 }
 
@@ -910,6 +1032,22 @@ void showBoot(int row) {
 // ==================== SETUP ====================
 void setup() {
   Serial.begin(115200);
+
+  prefs.begin("hud", false);
+  // No "qnh" key yet means this is the very first boot with nothing saved --
+  // seed it from the known home-field elevation once (below, after the baro
+  // is up) instead of leaving it at the standard-atmosphere default. Every
+  // boot after this trusts whatever's persisted (this seed, or a later
+  // manual QNH +-/SYNC ALT) rather than re-syncing to 52ft every time, since
+  // this unit won't always power on at home.
+  bool firstBoot = !prefs.isKey("qnh");
+  pitchOffset = prefs.getFloat("pitchOff", 0);
+  rollOffset = prefs.getFloat("rollOff", 0);
+  seaLevelPressure_hPa = prefs.getFloat("qnh", 1013.25f);
+  Serial.printf("Calibration loaded from NVS: pitchOff=%.1f rollOff=%.1f qnh=%.1f%s\n",
+                pitchOffset, rollOffset, seaLevelPressure_hPa,
+                firstBoot ? " (first boot, will seed from home-field alt)" : "");
+
   Wire.begin(8, 9);
 
   for (uint8_t a = 0x70; a <= 0x73; a++) {
@@ -978,6 +1116,13 @@ void setup() {
                     Adafruit_BMP280::FILTER_X4,
                     Adafruit_BMP280::STANDBY_MS_125);
     delay(50);
+
+    if (firstBoot) {
+      syncQnhToKnownAltitude();
+      markCalDirty();
+      Serial.println("First boot: seeded QNH from home-field elevation");
+    }
+
     Serial.printf("BARO first read: temp=%.2fC pressure=%.2fhPa altitude=%.1fm (%.0fft)\n",
                   bmp.readTemperature(), bmp.readPressure() / 100.0f,
                   bmp.readAltitude(seaLevelPressure_hPa),
@@ -1003,18 +1148,54 @@ void setup() {
 
   prevTime = millis();
   showBoot(row);
+
+  // Armed only after showBoot()'s up-to-60s "waiting for a tap" delay --
+  // arming it earlier would panic-reboot the board mid-splash-screen every
+  // time nobody's tapped it yet. From here on, loop() must feed it at least
+  // once every WDT_TIMEOUT_S or the chip force-reboots, recovering from a
+  // genuine hang (e.g. a display/DMA stall) instead of freezing forever.
+  const uint32_t WDT_TIMEOUT_S = 8;
+  esp_task_wdt_init(WDT_TIMEOUT_S, true);
+  esp_task_wdt_add(NULL);
+}
+
+// This RGB panel has no double-buffer -- confirmed in the GFX library itself
+// ("It uses a Single Frame Buffer in PSRAM"), and draw16bitRGBBitmap() writes
+// straight into that single buffer with zero sync to the DMA scan-out. A
+// full-frame flush() is therefore always racing the scan; this doesn't
+// eliminate that race, but chunking the same write into smaller row-bands
+// shrinks how long any single write is "live" and how much of the screen it
+// can smear if it does land mid-scan. Bands must stay full-width (0..800):
+// draw16bitRGBBitmap() has no stride parameter, so a sub-region only reads
+// correctly out of the canvas buffer when it spans the entire row.
+void flushBanded() {
+  const int BAND_H = 60;  // 480 / 60 = 8 bands/frame
+  uint16_t *fb = canvas->getFramebuffer();
+  for (int y = 0; y < 480; y += BAND_H) {
+    gfx->draw16bitRGBBitmap(0, y, fb + (size_t)y * 800, 800, BAND_H);
+  }
 }
 
 // ==================== LOOP ====================
 void loop() {
+  esp_task_wdt_reset();
+
   readTouch();
   processTouch();
+  saveCalIfDirty();
 
   selectMux();
   readIMU();
   readMag();
   readGPS();
   readBaro();
+
+  // IMU canary for a wedged I2C bus (see recoverI2CBus() for why). Recovery
+  // only clears the electrical wedge, so nothing downstream needs re-init.
+  if (imuOk && imuFailStreak > I2C_FAIL_THRESHOLD) {
+    recoverI2CBus();
+    imuFailStreak = 0;
+  }
 
   static unsigned long lastAttPrint = 0;
   if (millis() - lastAttPrint > 500) {
@@ -1039,7 +1220,7 @@ void loop() {
     }
   }
 
-  canvas->flush();
+  flushBanded();
   // Single unbuffered PSRAM framebuffer (no bounce buffer in this toolchain) is
   // actively DMA-scanned while flush() writes it; keeping loop period >= panel's
   // ~52ms refresh reduces how often a write collides mid-scan (visible as a shift).
