@@ -340,7 +340,12 @@ void readIMU() {
   float gyRate = gy / 131.0f - gyBias;
   float gzRate = gz / 131.0f - gzBias;
 
-  // vertical mount: gx=pitch (inverted, see above), gz=roll(inverted), gy=yaw
+  // Sensor mount orientation in the HUD box: X=right, Y=up, Z=rear. So pitch
+  // rotates about X, yaw about Y, and roll about Z -- gx=pitch (inverted, see
+  // above), gy=yaw, gz=roll (inverted). The axis *assignment* here follows
+  // directly from that orientation; which ones need sign-flipping doesn't
+  // (that's this chip's own sign convention combined with mount handedness)
+  // -- both inversions here were found empirically, not derived.
   pitch = 0.96f * (pitch - gxRate * dt) + 0.04f * accelPitch;
   roll  = 0.96f * (roll  - gzRate * dt) + 0.04f * accelRoll;
 
